@@ -542,6 +542,62 @@ function checkClaim(W, c) {
   return { ok: false, label: `无法核查的声明（${c.type}）`, measured: "引用了不存在的实体或未知类型" };
 }
 
+// ---------- conflict analysis (which constraints are jointly unsatisfiable) ----------
+// A requirement is "reachable" if some cell could satisfy it after the terrain tools have done their best:
+// carve_basin can make a lake anywhere on land, raise_ridge can make mountains, a lower river threshold
+// extends the channel network, but nothing can put an ocean where the spec says there is none.
+const REACHABLE = {
+  coast: (W, i) => W.dOcean[i] <= 4,
+  river_mouth: (W, i) => W.dOcean[i] <= 4,
+  on_river: (W, i) => W.dRiver[i] <= 12 * SC,
+  lakeside: () => true,
+  near_mountain: () => true,
+};
+function feasibleCount(W, items, relaxed) {
+  let n = 0, sample = -1;
+  const region = items.find(t => t.startsWith("region:"));
+  const reqs = items.filter(t => !t.startsWith("region:"));
+  for (let i = 0; i < NN; i++) {
+    if (!isDry(W, i)) continue;
+    if (slopeAt(W, i) > SLOPE_MAX * (relaxed ? 1.2 : 0.8)) continue;
+    if (region) { const [x, y] = cellXY(i); if (regionOf(x, y) !== region.slice(7)) continue; }
+    let ok = true;
+    for (const q of reqs) { const f = relaxed ? REACHABLE[q] : REQ_TEST[q]; if (f && !f(W, i)) { ok = false; break; } }
+    if (!ok) continue;
+    n++; if (sample < 0) sample = i;
+  }
+  return { n, sample };
+}
+// deletion-based minimal unsatisfiable subset: feasibility is monotone, so dropping items can only help
+function minimalCore(W, items) {
+  if (feasibleCount(W, items, true).n > 0) return null;
+  let core = items.slice();
+  for (const t of items) {
+    const without = core.filter(x => x !== t);
+    if (without.length && feasibleCount(W, without, true).n === 0) core = without;
+  }
+  return core;
+}
+const ITEM_ZH = t => t.startsWith("region:") ? `位于${REGION_ZH[t.slice(7)]}部` : REQ_ZH[t] || t;
+function analyseConflict(W, s) {
+  const items = [...(s.region ? ["region:" + s.region] : []), ...s.requires];
+  if (!items.length) return null;
+  const core = minimalCore(W, items);
+  if (!core) return null;
+  const alts = [];
+  if (core.some(t => t.startsWith("region:"))) {
+    const rest = core.filter(t => !t.startsWith("region:"));
+    const ok = REGIONS.filter(r => feasibleCount(W, ["region:" + r, ...rest], true).n > 0);
+    if (ok.length) alts.push(`改到${ok.slice(0, 3).map(r => REGION_ZH[r]).join("、")}部`);
+  }
+  for (const t of core) {
+    if (t.startsWith("region:")) continue;
+    const rest = core.filter(x => x !== t);
+    if (feasibleCount(W, rest, true).n > 0) alts.push(`放弃「${ITEM_ZH(t)}」${t === "coast" || t === "river_mouth" ? "（改为内河港）" : ""}`);
+  }
+  return { core, reason: `${core.map(ITEM_ZH).join(" + ")} 无法同时满足`, alternatives: alts };
+}
+
 // ---------- verifier ----------
 function rainShadow(W, m) {
   const r = W.P.ridges.find(q => q.mid === m.id); if (!r) return null;
@@ -604,6 +660,19 @@ function verify(W, lore) {
     const subj = c.s || c.a;
     add({ id: `lore.${e.id}.${k}`, cat: "叙事", code: "lore_claim", claim: c, target: subj, label: r.label, pass: r.ok, measured: r.measured, at: subj && W.P.pos[subj] ? [W.P.pos[subj]] : [] });
   });
+  // for settlements that fail a placement constraint, work out whether the constraint set is satisfiable at all
+  const conflicted = new Set();
+  for (const s2 of spec.settlements) {
+    if (!C.some(c => c.status === "fail" && c.target === s2.id && ["req_unmet", "wrong_region", "no_ocean"].includes(c.code))) continue;
+    const cf = analyseConflict(W, s2);
+    if (!cf) continue;
+    conflicted.add(s2.id);
+    for (const c of C) {
+      if (c.target !== s2.id || c.status !== "fail") continue;
+      const mine = c.code === "wrong_region" ? "region:" + s2.region : c.req;
+      if (mine && cf.core.includes(mine)) { c.conflict = cf; c.measured += `；冲突：${cf.reason}${cf.alternatives.length ? "，可选：" + cf.alternatives.join(" / ") : ""}`; }
+    }
+  }
   const fails = C.filter(c => c.status === "fail");
   const counted = C.filter(c => c.status !== "declared");
   return { checks: C, fails, rate: counted.length ? counted.filter(c => c.pass).length / counted.length : 1 };
@@ -735,6 +804,12 @@ function scriptedStructured(W, report, history) {
     const tg = new Set(loreT || []);
     s.requires.forEach(q => tg.add(REQ_TARGET[q]));
     if (!tg.size) tg.add("flattest_nearby");
+    const conflictFails = failing.filter(f => f.conflict);
+    if (conflictFails.length) {
+      conflictFails.forEach(f => push("declare_unsatisfiable", { check_id: f.id, reason: f.conflict.reason }));
+      notes.push(`${s.name}：${conflictFails[0].conflict.reason} → 声明无法满足${conflictFails[0].conflict.alternatives.length ? `（建议${conflictFails[0].conflict.alternatives[0]}）` : ""}`);
+      continue;
+    }
     if (lastFails.has(s.id)) {
       // moving alone did not work last round: change the terrain instead
       if (s.requires.includes("lakeside") && s.region && !P.basins.some(b => b.region === s.region)) { push("carve_basin", { region: s.region }); if (P.hydro !== "filled") push("fill_depressions", {}); notes.push(`${s.name}附近无湖 → 在${REGION_ZH[s.region]}部造湖`); }

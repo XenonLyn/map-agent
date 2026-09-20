@@ -1,0 +1,10 @@
+policy,cat,n,converged,init,final,iters,rate,actions,failed_actions,wasted,regress,osc,unsat_tp,unsat_fp,unsat_fn,ms
+rule-structured,simple,11,1,3.73,0,2.27,1,5.55,1.18,0.55,0.82,0,0,4,0,7027.09
+rule-structured,multi,12,1,8.08,0,3.17,1,12.75,3,0.5,2.5,0.17,0,12,0,10430.33
+rule-structured,contradictory,7,1,9,0,2.43,1,12.86,2.14,0.14,2.29,0.14,5,3,1,8827.57
+rule-none,simple,11,0,3.73,3.73,0,0.73,0,0,0,0,0,0,0,0,1936.82
+rule-none,multi,12,0,8.08,8.08,0,0.74,0,0,0,0,0,0,0,0,1940.58
+rule-none,contradictory,7,0,9,9,0,0.72,0,0,0,0,0,0,0,6,1887
+rule-binary,simple,11,0,3.73,2.55,6,0.82,12,0.82,5,1.09,0.18,0,0,0,14389.36
+rule-binary,multi,12,0,8.08,6.83,6,0.78,12,0.75,4.42,2.5,0.25,0,0,0,14757.08
+rule-binary,contradictory,7,0,9,8.29,6,0.75,12,1.43,5,2.29,0.14,0,0,6,14872.57

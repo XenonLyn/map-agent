@@ -1,0 +1,8 @@
+trial,cat,policy,init,final,iters,converged,rate,traj,stopped,actions,actions_failed,wasted_iters,regressions,oscillations,declared,declared_cores,unsat_expected,unsat_tp,unsat_fp,unsat_fn,ms
+T024,contradictory,rule+core,11,0,2,1,1,11>1>0,converged,11,1,0,1,0,1,spec.req.S7.coast=coast,1,1,0,0,12210
+T025,contradictory,rule+core,7,0,1,1,1,7>0,converged,6,0,0,0,0,1,spec.req.S6.coast=coast,1,1,0,0,7305
+T026,contradictory,rule+core,10,0,2,1,1,10>4>0,converged,16,3,0,4,0,1,spec.req.S7.coast=coast,1,1,0,0,12572
+T027,contradictory,rule+core,11,0,3,1,1,11>4>2>0,converged,18,3,0,5,1,2,spec.req.S8.coast=coast ; phys.dry.S8=coast,1,1,1,0,16736
+T028,contradictory,rule+core,6,0,2,1,1,6>5>0,converged,10,1,0,5,0,1,spec.req.S7.coast=coast,1,1,0,0,9758
+T029,contradictory,rule+core,6,0,3,1,1,6>2>1>0,converged,11,2,0,2,0,1,spec.req.S8.coast=region:S+coast,0,0,1,0,16210
+T030,contradictory,rule+core,8,0,2,1,1,8>1>0,converged,10,1,0,1,0,2,spec.req.S1.coast=region:SW+coast ; spec.req.S7.coast=region:C+coast,0,0,2,0,18898

@@ -15,9 +15,28 @@ The whole app is one self-contained page: `dist/region-map-agent.html`. Open it 
 | `src/view3d.js` | three.js diorama: terrain mesh, water, city decals, instanced buildings, landmark models, camera controls |
 | `src/ui.js` | Agent loop, Claude calls (artifact `sample` capability), panels, 2D rendering, edits |
 | `src/template.html` | Page markup and CSS; `build.py` inlines the scripts at `/*__SCRIPT__*/` |
+| `src/bench.js` | Test-set generator, trial runner with 20 metrics, conflict-core review export, fault-injection harness (shared by node and the browser) |
 | `tests/` | Node tests for the core loop and city generation; Playwright screenshot script |
 
 ## Build and test
+
+### Experiments
+
+```bash
+node tests/benchmark.js 30 6 structured 0 30   # baseline, one feedback condition at a time (appends to results/baseline.csv)
+node tests/benchmark.js 30 6 binary 0 30
+node tests/benchmark.js 30 6 none 0 30
+node tests/injection.js 10                     # verifier reliability (only injects into worlds the verifier calls clean)
+```
+
+In the page (claude.ai, Claude engine enabled), from the browser console:
+
+```js
+runBatch({n: 12, policy: "llm", feedback: "structured"})  // group A: same WorldSpec, agent vs rule baseline
+runExtraction()                                           // group B: free text -> WorldSpec, which the baseline cannot do
+```
+
+Both download a CSV with the same columns as `results/baseline.csv`.
 
 ```bash
 python3 build.py          # writes dist/region-map-agent.html

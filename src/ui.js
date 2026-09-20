@@ -538,6 +538,69 @@ function renderLore() {
   });
 }
 
+// ---------- batch experiments (group A: same WorldSpec, agent vs rule baseline) ----------
+// Run from the browser console:  runBatch({n: 12, policy: "llm", feedback: "structured"})
+async function runBatch(opts = {}) {
+  const { n = 12, policy = "llm", feedback = "structured", maxIter = 6, offset = 0 } = opts;
+  if (policy === "llm" && !S.sample) { console.warn("Claude 不可用，无法跑 LLM 组"); return; }
+  S.ctl = new AbortController();
+  const trials = makeTestSet(n + offset).slice(offset);
+  const rows = [];
+  const label = policy === "llm" ? `llm-${feedback}-${$("#tier").value}` : `rule-${feedback}`;
+  const fn = policy === "llm"
+    ? async (W, rep, hist) => { const p = await llmRepair(W, rep, hist, feedback, {}); return p; }
+    : SCRIPTED[feedback === "binary" ? "binary" : feedback === "none" ? "none" : "structured"](label).fn;
+  for (const t of trials) {
+    S.llmCalls = 0;
+    const t0 = performance.now();
+    const { rec } = await runTrial(t, fn, { maxIter, label });
+    rec.llm_calls = S.llmCalls; rec.wall_ms = Math.round(performance.now() - t0);
+    rows.push(rec);
+    console.log(`${rows.length}/${trials.length}`, rec.trial, rec.cat, rec.traj, rec.stopped, `${(rec.wall_ms / 1000).toFixed(1)}s`);
+    window.__batchRows = rows;
+  }
+  console.table(summarise(rows));
+  downloadCSV(`${label}.csv`, toCSV(rows));
+  return rows;
+}
+// group B: free-text description -> WorldSpec, which the rule baseline cannot do at all
+async function runExtraction(cases) {
+  if (!S.sample) { console.warn("Claude 不可用"); return; }
+  S.ctl = new AbortController();
+  const rows = [];
+  for (const c of cases || PRESETS.map(p => ({ id: p.key, text: p.text, gold: normalizeSpec(p.spec) }))) {
+    let got = null, err = "";
+    try { got = normalizeSpec(await llmPlan(c.text, {})); } catch (e) { err = e.message || String(e); }
+    rows.push({ case: c.id, err, ...(got ? compareSpecs(c.gold, got) : {}) });
+    console.log(rows[rows.length - 1]);
+  }
+  console.table(rows);
+  downloadCSV("extraction.csv", toCSV(rows));
+  return rows;
+}
+// crude field-level agreement between a gold WorldSpec and an extracted one
+function compareSpecs(gold, got) {
+  const setOf = ss => new Set(ss.map(s => `${s.type}|${s.region}|${[...s.requires].sort().join("+")}`));
+  const g = setOf(gold.settlements), h = setOf(got.settlements);
+  const inter = [...h].filter(x => g.has(x)).length;
+  return {
+    ocean_side: gold.ocean_side === got.ocean_side ? 1 : 0,
+    wind_from: gold.wind_from === got.wind_from ? 1 : 0,
+    n_mountains: got.mountains.length, gold_mountains: gold.mountains.length,
+    mountain_region_hits: got.mountains.filter(m => gold.mountains.some(q => q.region === m.region)).length,
+    n_settlements: got.settlements.length, gold_settlements: gold.settlements.length,
+    settlement_precision: +(inter / Math.max(1, h.size)).toFixed(2),
+    settlement_recall: +(inter / Math.max(1, g.size)).toFixed(2),
+    min_rivers_match: gold.min_major_rivers === got.min_major_rivers ? 1 : 0,
+  };
+}
+function downloadCSV(name, text) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
 // ---------- settlement plans (generated in the background) ----------
 function plansReady(W) { return !!(W._roads && W._plans && W.spec.settlements.every(s => W._plans[s.id])); }
 function schedulePlans(W) {
