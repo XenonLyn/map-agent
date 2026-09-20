@@ -144,17 +144,58 @@ async function llmJSON(prompt, what, item) {
 const SPEC_SCHEMA = `{"name": string, "seed": integer, "ocean_side": "E"|"W"|"N"|"S"|"all"|"none", "wind_from": "E"|"W"|"N"|"S",
  "mountains": [{"name": string, "region": R, "orientation": "EW"|"NS"}],
  "min_major_rivers": 0-6, "min_lakes": 0-4,
- "settlements": [{"name": string, "type": "port"|"city"|"town"|"village"|"fortress", "region": R, "requires": subset of ["coast","river_mouth","on_river","lakeside","near_mountain"]}]}
-R is one of NW, N, NE, W, C, E, SW, S, SE (a 3x3 grid, north is up).`;
+ "settlements": [{"name": string, "type": "port"|"city"|"town"|"village"|"fortress", "region": R,
+                  "requires": subset of ["coast","river_mouth","on_river","lakeside","near_mountain","accessible","defensible"],
+                  "proposed": subset of "requires" — the ones YOU inferred rather than read,
+                  "rationale": short Chinese sentence saying why the proposed ones follow}],
+ "relations": [{"type": "downstream_of"|"within_days_of", "a": settlement name, "b": settlement name,
+                "days": number (within_days_of only), "source": "explicit"|"proposed", "rationale": short Chinese sentence}],
+ "style": {"era": "medieval"|"modern"|"future"|"alien", "street_pattern": "organic"|"grid"|"radial"|"ring"|"terraced",
+           "block_scale": 0.5-2, "building_height": 0.5-4, "walls": "always"|"never"|"auto",
+           "landmarks": subset of ["plaza","cathedral","church","chapel","cityhall","market","hospital","clinic","school","library","station","factory","keep","lighthouse"]}}
+R is one of NW, N, NE, W, C, E, SW, S, SE (a 3x3 grid, north is up). The map is 1024 km across, 1 cell = 2 km.
+
+What the checkable requirements mean:
+  coast / river_mouth / on_river / lakeside / near_mountain — the site is next to that feature
+  accessible  — the site sits in an easily traversed corridor (terrain permeability over its neighbourhood is in the top third)
+  defensible  — the site commands its surroundings or holds a choke point (top ~15% of terrain)
+  downstream_of(a, b)   — water leaving b flows past a, so b can foul or cut a's water
+  within_days_of(a, b, days) — a is at most that many days of travel from b (32 km/day, slope-weighted)`;
 
 async function llmPlan(desc, item) {
-  const prompt = `You turn a worldbuilding description into a WorldSpec for a procedural regional map generator (${N}x${N} cells, 2 km per cell, so ${N * 2} km across; north is up).
+  const prompt = `You turn a worldbuilding description into a WorldSpec for a procedural regional map generator.
+
 Reply with only one JSON object of this shape:
 ${SPEC_SCHEMA}
+
+You do three jobs at once.
+
+1. HARD CONSTRAINTS — encode what the description states. Do not invent these.
+
+2. PROPOSED CONSTRAINTS — add the geographic conditions that the description *implies* but does not state, and mark
+   every one of them in "proposed" (for settlement requirements) or with "source": "proposed" (for relations).
+   Each needs a one-line "rationale" in Chinese. Examples of the reasoning wanted:
+     a prosperous trading town needs "accessible" — wealth follows traffic, and a town walled in by mountains cannot trade
+     a border fortress needs "defensible" — it exists to hold ground
+     a mill town belongs on a river; a quarantine hospital or a tannery belongs downstream of the town it serves
+     a satellite village should be "within_days_of" its market town, otherwise it would not be its satellite
+   Propose only what the five checkable predicates and two relations above can express. Atmosphere ("常年有雾",
+   "闹鬼的矿镇") is NOT a constraint — leave it out; the narrative layer will use it.
+   Be willing to propose: a verifier checks each one, and conflicts are reported rather than silently accepted.
+   Proposed constraints are relaxed before explicit ones when something is impossible, so a wrong guess is cheap.
+   As a rule of thumb, propose between one and two per settlement, and at most 6 relations.
+
+3. STYLE PROFILE — read the era and culture off the description and fill "style". This drives how towns are drawn,
+   never where things go: a medieval town is organic with walls and a cathedral; a modern city is a grid with a station,
+   hospital and factories, taller buildings and no walls; a future or alien settlement can be radial or terraced with
+   much taller structures. Pick "landmarks" as the vocabulary that fits that world.
+
 Rules:
 - "all" means an island, "none" means landlocked.
-- At most 6 mountains and 12 settlements. The region is large, so 6-10 settlements spread over several regions work well. Keep names in the description's language.
-- Encode only what the description states or clearly implies. If the description asks for something impossible (for example a port in a landlocked region), keep that requirement anyway: a verifier will flag it later.
+- At most 6 mountains and 12 settlements; keep names in the description's language.
+- Relations refer to settlements by their name; ids are assigned later.
+- If the description asks for something impossible (a port in a landlocked region), keep it anyway: the verifier
+  will find the conflict and report it. Never quietly fix the user's intent.
 
 Description:
 """${desc.slice(0, 3000)}"""`;
@@ -303,7 +344,7 @@ async function runAgent() {
     let raw;
     if (eng === "claude") {
       const item = addTrace({ kind: "plan", title: "规划器", body: "把描述转成 WorldSpec（结构化规格）。" });
-      raw = await llmPlan(desc, item);
+      raw = resolveRelationNames(await llmPlan(desc, item));
     } else {
       raw = preset.spec;
       addTrace({ kind: "plan", title: "规划器（离线）", body: desc !== preset.text ? "离线模式只能读取预设写好的 WorldSpec，你改过的描述没有被使用。要解析自定义描述，请切换到 Claude。" : "使用预设写好的 WorldSpec。离线模式不调用模型。" });
@@ -544,7 +585,7 @@ async function runBatch(opts = {}) {
   const { n = 12, policy = "llm", feedback = "structured", maxIter = 6, offset = 0 } = opts;
   if (policy === "llm" && !S.sample) { console.warn("Claude 不可用，无法跑 LLM 组"); return; }
   S.ctl = new AbortController();
-  const trials = makeTestSet(n + offset).slice(offset);
+  const trials = makeTestSet(BENCH_POOL).slice(offset, offset + n);   // fixed pool, so trial ids mean the same thing in every run
   const rows = [];
   const label = policy === "llm" ? `llm-${feedback}-${$("#tier").value}` : `rule-${feedback}`;
   const fn = policy === "llm"
@@ -567,18 +608,41 @@ async function runBatch(opts = {}) {
 async function runExtraction(cases) {
   if (!S.sample) { console.warn("Claude 不可用"); return; }
   S.ctl = new AbortController();
-  const rows = [];
+  const rows = [], props = [], styles = [];
   for (const c of cases || PRESETS.map(p => ({ id: p.key, text: p.text, gold: normalizeSpec(p.spec) }))) {
     let got = null, err = "";
-    try { got = normalizeSpec(await llmPlan(c.text, {})); } catch (e) { err = e.message || String(e); }
+    try { got = normalizeSpec(resolveRelationNames(await llmPlan(c.text, {}))); } catch (e) { err = e.message || String(e); }
+    if (got) { props.push(...proposalRows(c.id, got)); styles.push({ case: c.id, ...got.style, landmarks: (got.style.landmarks || []).join("|") }); }
     rows.push({ case: c.id, err, ...(got ? compareSpecs(c.gold, got) : {}) });
     console.log(rows[rows.length - 1]);
   }
   console.table(rows);
-  downloadCSV("extraction.csv", toCSV(rows));
-  return rows;
+  console.table(props);
+  window.__extraction = { rows, props, styles };
+  console.log("复制用：copy(toCSV(window.__extraction.props))  —— 逐条标注 label 列：合理 / 不合理 / 无关");
+  return { rows, props, styles };
 }
 // crude field-level agreement between a gold WorldSpec and an extracted one
+// the model writes relations with settlement names; turn them into the ids normalizeSpec expects
+function resolveRelationNames(raw) {
+  if (!raw || !Array.isArray(raw.settlements)) return raw;
+  const byName = {};
+  raw.settlements.forEach((s, k) => { if (s && s.name) byName[String(s.name).trim()] = "S" + (k + 1); });
+  if (Array.isArray(raw.relations)) raw.relations = raw.relations.map(rl => rl && ({ ...rl, a: byName[String(rl.a).trim()] || rl.a, b: byName[String(rl.b).trim()] || rl.b })).filter(Boolean);
+  return raw;
+}
+// every proposed constraint, one row per proposal, for hand labelling (合理 / 不合理 / 无关)
+function proposalRows(caseId, spec) {
+  const rows = [];
+  for (const s of spec.settlements) for (const q of s.proposed || [])
+    rows.push({ case: caseId, kind: "requirement", subject: s.name, type: TYPE_ZH[s.type], region: REGION_ZH[s.region] || "", constraint: REQ_ZH[q] || q, rationale: s.rationale || "", label: "" });
+  for (const rl of spec.relations || []) {
+    if (rl.source !== "proposed") continue;
+    const A = spec.settlements.find(q => q.id === rl.a), B = spec.settlements.find(q => q.id === rl.b);
+    rows.push({ case: caseId, kind: "relation", subject: A ? A.name : rl.a, type: "", region: "", constraint: `${REL_ZH[rl.type]}${rl.type === "within_days_of" ? " " + rl.days + " 天" : ""} → ${B ? B.name : rl.b}`, rationale: rl.rationale || "", label: "" });
+  }
+  return rows;
+}
 function compareSpecs(gold, got) {
   const setOf = ss => new Set(ss.map(s => `${s.type}|${s.region}|${[...s.requires].sort().join("+")}`));
   const g = setOf(gold.settlements), h = setOf(got.settlements);
@@ -592,6 +656,9 @@ function compareSpecs(gold, got) {
     settlement_precision: +(inter / Math.max(1, h.size)).toFixed(2),
     settlement_recall: +(inter / Math.max(1, g.size)).toFixed(2),
     min_rivers_match: gold.min_major_rivers === got.min_major_rivers ? 1 : 0,
+    n_proposed: got.settlements.reduce((a, s) => a + (s.proposed || []).length, 0),
+    n_relations: (got.relations || []).length,
+    era: got.style.era, street_pattern: got.style.street_pattern,
   };
 }
 function downloadCSV(name, text) {

@@ -1,0 +1,4 @@
+trial,cat,policy,init,final,iters,converged,rate,traj,stopped,actions,actions_failed,wasted_iters,regressions,oscillations,declared,declared_cores,unsat_expected,unsat_tp,unsat_fp,unsat_fn,ms,llm_calls,wall_ms
+T001,simple,llm-structured-default,5,0,2,1,1,5>1>0,converged,5,0,0,1,0,0,,0,0,0,0,7088,2,7088
+T002,simple,llm-structured-default,4,0,1,1,1,4>0,converged,3,0,0,0,0,0,,0,0,0,0,3264,1,3264
+T003,multi,llm-structured-default,9,0,2,1,1,9>2>0,converged,13,0,0,2,0,0,,0,0,0,0,10366,2,10366

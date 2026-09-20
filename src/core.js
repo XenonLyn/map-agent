@@ -6,10 +6,12 @@ const SLOPE_MAX = 0.016;        // settlements need flatter ground than this
 const LAKE_DEPTH = 0.024, LAKE_MIN = 160;
 const MAJOR_LEN = 60;           // cells of main stem for a "major" river
 const MOUNTAIN_MIN_CELLS = 1400;
+const ACCESS_T = 0.88, ACCESS_SOFT = 0.80, DEF_T = 0.22;   // corridor / defensible-site thresholds, set from measured percentiles
 const REGIONS = ["NW", "N", "NE", "W", "C", "E", "SW", "S", "SE"];
 const REGION_ZH = { NW: "西北", N: "北", NE: "东北", W: "西", C: "中", E: "东", SW: "西南", S: "南", SE: "东南" };
 const TYPE_ZH = { port: "港口", city: "城市", town: "城镇", village: "村庄", fortress: "要塞" };
-const REQ_ZH = { coast: "临海", river_mouth: "位于河口", on_river: "临河", lakeside: "临湖", near_mountain: "靠近山脉" };
+const REQ_ZH = { coast: "临海", river_mouth: "位于河口", on_river: "临河", lakeside: "临湖", near_mountain: "靠近山脉", accessible: "交通通达", defensible: "易守难攻" };
+const REL_ZH = { downstream_of: "位于其下游", within_days_of: "路程不超过" };
 const BIOME_ZH = { ocean: "海洋", lake: "湖泊", snow: "雪峰", rock: "裸岩山地", tundra: "苔原", taiga: "针叶林", steppe: "干草原", desert: "荒漠", grassland: "草地", forest: "温带森林", marsh: "沼泽", rainforest: "温带雨林" };
 const RIVER_NAMES = ["灰水河", "柳溪", "黑石河", "银带河", "雾川", "赤泥河", "鹭河", "冷泉河", "白沙河", "枯苇河", "长汀", "鸣石溪"];
 const LAKE_NAMES = ["镜湖", "沉钟湖", "苇塘", "寒潭", "月牙泊", "灰眼湖", "无底潭", "鹤汀湖"];
@@ -64,9 +66,28 @@ function normalizeSpec(raw) {
     let req = (Array.isArray(t.requires) ? t.requires : []).filter(r => REQ.includes(r));
     if (type === "port" && !req.includes("coast")) req.unshift("coast");
     if (req.includes("river_mouth") && !req.includes("coast")) req.unshift("coast");
-    return { id: "S" + (i + 1), name: String(t.name || ("聚落" + (i + 1))).slice(0, 20), type, region: REGIONS.includes(t.region) ? t.region : null, requires: [...new Set(req)] };
+    const prop = (Array.isArray(t.proposed) ? t.proposed : []).filter(q => req.includes(q));
+    return { id: "S" + (i + 1), name: String(t.name || ("聚落" + (i + 1))).slice(0, 20), type, region: REGIONS.includes(t.region) ? t.region : null, requires: [...new Set(req)], proposed: [...new Set(prop)], rationale: String(t.rationale || "").slice(0, 120) };
   });
+  const ids = new Set(out.settlements.map(q => q.id));
+  out.relations = (Array.isArray(s.relations) ? s.relations : []).slice(0, 10)
+    .filter(rl => rl && REL_ZH[rl.type] && ids.has(rl.a) && ids.has(rl.b) && rl.a !== rl.b)
+    .map((rl, i) => ({ id: "L" + (i + 1), type: rl.type, a: rl.a, b: rl.b, days: clamp(+rl.days || 5, 0.5, 40), source: rl.source === "proposed" ? "proposed" : "explicit", rationale: String(rl.rationale || "").slice(0, 120) }));
+  out.style = normalizeStyle(s.style);
   return out;
+}
+// Style profile: proposed by the intent layer, ignored by the structure layer, read by the city planner.
+const STYLE_DEFAULT = { era: "medieval", street_pattern: "organic", block_scale: 1, building_height: 1, walls: "auto", landmarks: null };
+function normalizeStyle(st) {
+  const o = { ...STYLE_DEFAULT };
+  if (!st || typeof st !== "object") return o;
+  if (["medieval", "modern", "future", "alien"].includes(st.era)) o.era = st.era;
+  if (["organic", "grid", "radial", "ring", "terraced"].includes(st.street_pattern)) o.street_pattern = st.street_pattern;
+  o.block_scale = clamp(+st.block_scale || 1, 0.5, 2);
+  o.building_height = clamp(+st.building_height || 1, 0.5, 4);
+  if (["always", "never", "auto"].includes(st.walls)) o.walls = st.walls;
+  if (Array.isArray(st.landmarks)) o.landmarks = st.landmarks.filter(k => typeof k === "string").slice(0, 16);
+  return o;
 }
 function initParams(spec) {
   return {
@@ -390,6 +411,76 @@ function biomeOf(e, sea, m, v) {
   return "rainforest";
 }
 
+// ---------- geography: how a site relates to the rest of the region ----------
+// Cell-level fields (cheap, used by placement predicates) and settlement-level measures
+// (richer, computed on the road graph and used for facts and explanations).
+function geoFields(W) {
+  if (W._geo) return W._geo;
+  const { h, P } = W;
+  const perm = new Float32Array(NN);            // terrain permeability: how easily traffic crosses this cell
+  for (let i = 0; i < NN; i++) {
+    if (W.ocean[i] || W.hy.lake[i]) { perm[i] = 0; continue; }
+    const rel = h[i] - P.sea;
+    perm[i] = clamp(1 - slopeAt(W, i) / (SLOPE_MAX * 2.5), 0, 1) * (rel > MOUNTAIN_REL ? 0.25 : 1);
+  }
+  const access = boxBlurCore(perm, Math.round(8 * SC));     // a corridor is permeable over a whole neighbourhood
+  const hBlur = boxBlurCore(h, Math.round(9 * SC));
+  const permBlur = boxBlurCore(perm, Math.round(4 * SC));
+  const def = new Float32Array(NN);             // defensibility: locally high ground, or a choke point
+  for (let i = 0; i < NN; i++) {
+    if (W.ocean[i] || W.hy.lake[i]) continue;
+    const command = clamp((h[i] - hBlur[i]) / 0.06, 0, 1);            // stands above its surroundings
+    const choke = clamp((0.55 - permBlur[i]) / 0.45, 0, 1) * clamp(perm[i] / 0.5, 0, 1); // passable spot in hard country
+    def[i] = clamp(0.65 * command + 0.5 * choke, 0, 1);
+  }
+  W._geo = { perm, access, def };
+  return W._geo;
+}
+// how much land a site can reach within a day's travel, in cells
+function hinterland(W, sid, days = 1.5) {
+  travelDays(W, sid, sid);
+  const dist = W.travel.get(sid), budget = days * KM_PER_DAY / KM_PER_CELL;
+  let n = 0; for (let i = 0; i < NN; i++) if (dist[i] <= budget) n++;
+  return n;
+}
+// betweenness on the road graph: how much through-traffic a settlement carries
+function roadCentrality(W) {
+  if (W._cent) return W._cent;
+  const S = W.spec.settlements, idx = {}; S.forEach((s, k) => idx[s.id] = k);
+  const n = S.length, INF = 1e9;
+  const d = Array.from({ length: n }, () => new Float64Array(n).fill(INF));
+  const via = Array.from({ length: n }, () => new Int32Array(n).fill(-1));
+  for (let k = 0; k < n; k++) d[k][k] = 0;
+  for (const rd of buildRoads(W)) {
+    const a = idx[rd.a], b = idx[rd.b]; if (a == null || b == null) continue;
+    let len = 0; for (let k = 1; k < rd.pts.length; k++) len += Math.hypot(rd.pts[k][0] - rd.pts[k - 1][0], rd.pts[k][1] - rd.pts[k - 1][1]);
+    if (len < d[a][b]) { d[a][b] = d[b][a] = len; via[a][b] = via[b][a] = -1; }
+  }
+  for (let m = 0; m < n; m++) for (let a = 0; a < n; a++) for (let b = 0; b < n; b++)
+    if (d[a][m] + d[m][b] < d[a][b]) { d[a][b] = d[a][m] + d[m][b]; via[a][b] = m; }
+  const cnt = new Float64Array(n);
+  const walk = (a, b) => { const m = via[a][b]; if (m < 0) return; cnt[m]++; walk(a, m); walk(m, b); };
+  for (let a = 0; a < n; a++) for (let b = a + 1; b < n; b++) if (d[a][b] < INF) walk(a, b);
+  const pairs = Math.max(1, n * (n - 1) / 2);
+  W._cent = Object.fromEntries(S.map((s, k) => [s.id, +(cnt[k] / pairs).toFixed(3)]));
+  return W._cent;
+}
+// does water flowing past a upstream reach b? (a controls b's water)
+function dominatesDownstream(W, a, b) { return upstreamOf(W, a, b); }
+function geoProfile(W, sid) {
+  const g = geoFields(W), i = posIdx(W, sid);
+  const ports = W.spec.settlements.filter(s => s.type === "port" && s.id !== sid);
+  let portDays = null;
+  for (const p of ports) { const d = travelDays(W, sid, p.id); if (d != null && (portDays == null || d < portDays)) portDays = d; }
+  return {
+    accessibility: +g.access[i].toFixed(2),
+    defensibility: +g.def[i].toFixed(2),
+    road_centrality: roadCentrality(W)[sid] ?? 0,
+    hinterland_cells: hinterland(W, sid),
+    days_to_nearest_port: portDays,
+  };
+}
+
 // ---------- derive a whole world ----------
 function derive(spec, P) {
   P = deep(P);
@@ -408,6 +499,8 @@ function derive(spec, P) {
     dLake: distField(i => hy.lake[i]),
     dMount: distField(i => !ocean[i] && h[i] - P.sea > MOUNTAIN_REL),
     dMouth: distField(i => seaMouths[i]),
+    get access() { return geoFields(this).access; },
+    get def() { return geoFields(this).def; },
     travel: new Map(),
   };
   if (!W.P.pos) placeInitial(W);
@@ -426,6 +519,8 @@ const REQ_TEST = {
   on_river: (W, i) => W.dRiver[i] <= 1.5,
   lakeside: (W, i) => W.dLake[i] <= 2.5,
   near_mountain: (W, i) => W.dMount[i] <= 14 && W.h[i] - W.P.sea < MOUNTAIN_REL - 0.04,
+  accessible: (W, i) => W.access[i] >= ACCESS_T,
+  defensible: (W, i) => W.def[i] >= DEF_T,
 };
 function placeInitial(W) {
   const r = rng(W.P.seed + 999); W.P.pos = {};
@@ -551,12 +646,18 @@ const REACHABLE = {
   river_mouth: (W, i) => W.dOcean[i] <= 4,
   on_river: (W, i) => W.dRiver[i] <= 12 * SC,
   lakeside: () => true,
-  near_mountain: () => true,
+  near_mountain: () => true,                        // raise_ridge can put mountains next to a site
+  accessible: (W, i) => W.access[i] >= ACCESS_SOFT, // no tool can carve a corridor through a massif
+  defensible: () => true,
 };
 function feasibleCount(W, items, relaxed) {
   let n = 0, sample = -1;
   const region = items.find(t => t.startsWith("region:"));
-  const reqs = items.filter(t => !t.startsWith("region:"));
+  const masks = items.filter(t => t.startsWith("downstream:") || t.startsWith("near:")).map(t => {
+    if (t.startsWith("downstream:")) { const o = t.slice(11); return W.P.pos[o] ? downstreamMask(W, o) : null; }
+    const [o, d] = t.slice(5).split("@"); return W.P.pos[o] ? withinDaysMask(W, o, +d || 5) : null;
+  }).filter(Boolean);
+  const reqs = items.filter(t => !t.startsWith("region:") && !t.startsWith("downstream:") && !t.startsWith("near:"));
   for (let i = 0; i < NN; i++) {
     if (!isDry(W, i)) continue;
     if (slopeAt(W, i) > SLOPE_MAX * (relaxed ? 1.2 : 0.8)) continue;
@@ -564,6 +665,7 @@ function feasibleCount(W, items, relaxed) {
     let ok = true;
     for (const q of reqs) { const f = relaxed ? REACHABLE[q] : REQ_TEST[q]; if (f && !f(W, i)) { ok = false; break; } }
     if (!ok) continue;
+    if (masks.some(m => !m[i])) continue;
     n++; if (sample < 0) sample = i;
   }
   return { n, sample };
@@ -578,9 +680,14 @@ function minimalCore(W, items) {
   }
   return core;
 }
-const ITEM_ZH = t => t.startsWith("region:") ? `位于${REGION_ZH[t.slice(7)]}部` : REQ_ZH[t] || t;
-function analyseConflict(W, s) {
-  const items = [...(s.region ? ["region:" + s.region] : []), ...s.requires];
+const ITEM_ZH = t => {
+  if (t.startsWith("region:")) return `位于${REGION_ZH[t.slice(7)]}部`;
+  if (t.startsWith("downstream:")) return `位于某地下游`;
+  if (t.startsWith("near:")) { const [, d] = t.slice(5).split("@"); return `路程不超过 ${d} 天`; }
+  return REQ_ZH[t] || t;
+};
+function analyseConflict(W, s, extra) {
+  const items = [...(s.region ? ["region:" + s.region] : []), ...s.requires, ...(extra || [])];
   if (!items.length) return null;
   const core = minimalCore(W, items);
   if (!core) return null;
@@ -590,10 +697,12 @@ function analyseConflict(W, s) {
     const ok = REGIONS.filter(r => feasibleCount(W, ["region:" + r, ...rest], true).n > 0);
     if (ok.length) alts.push(`改到${ok.slice(0, 3).map(r => REGION_ZH[r]).join("、")}部`);
   }
-  for (const t of core) {
+  const proposed = new Set(s.proposed || []);
+  const ordered = [...core].sort((a, b) => (proposed.has(b) ? 1 : 0) - (proposed.has(a) ? 1 : 0)); // proposed constraints yield first
+  for (const t of ordered) {
     if (t.startsWith("region:")) continue;
     const rest = core.filter(x => x !== t);
-    if (feasibleCount(W, rest, true).n > 0) alts.push(`放弃「${ITEM_ZH(t)}」${t === "coast" || t === "river_mouth" ? "（改为内河港）" : ""}`);
+    if (feasibleCount(W, rest, true).n > 0) alts.push(`放弃「${ITEM_ZH(t)}」${proposed.has(t) ? "（提议约束，可优先让步）" : t === "coast" || t === "river_mouth" ? "（改为内河港）" : ""}`);
   }
   return { core, reason: `${core.map(ITEM_ZH).join(" + ")} 无法同时满足`, alternatives: alts };
 }
@@ -651,7 +760,13 @@ function verify(W, lore) {
         continue;
       }
       const ok = REQ_TEST[q](W, i);
-      add({ id: `spec.req.${s.id}.${q}`, cat: "规格", code: "req_unmet", target: s.id, req: q, label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q]}`, pass: ok, measured: ok ? "满足" : "不满足", at: [p] });
+      const g = q === "accessible" || q === "defensible" ? geoFields(W) : null;
+      const detail = !g ? (ok ? "满足" : "不满足")
+        : q === "accessible" ? `通达度 ${g.access[i].toFixed(2)}（需 ≥ ${ACCESS_T}）`
+        : `防御性 ${g.def[i].toFixed(2)}（需 ≥ ${DEF_T}）`;
+      const tag = (s.proposed || []).includes(q) ? "（提议）" : "";
+      add({ id: `spec.req.${s.id}.${q}`, cat: "规格", code: "req_unmet", target: s.id, req: q, source: (s.proposed || []).includes(q) ? "proposed" : "explicit",
+        label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q]}${tag}`, pass: ok, measured: detail, at: [p] });
     }
   }
   // narrative
@@ -660,16 +775,35 @@ function verify(W, lore) {
     const subj = c.s || c.a;
     add({ id: `lore.${e.id}.${k}`, cat: "叙事", code: "lore_claim", claim: c, target: subj, label: r.label, pass: r.ok, measured: r.measured, at: subj && W.P.pos[subj] ? [W.P.pos[subj]] : [] });
   });
+  // relations between settlements (proposed constraints usually live here)
+  for (const rl of spec.relations || []) {
+    const A = spec.settlements.find(q => q.id === rl.a), B = spec.settlements.find(q => q.id === rl.b);
+    if (!A || !B) continue;
+    const tag = rl.source === "proposed" ? "（提议）" : "";
+    if (rl.type === "downstream_of") {
+      const ok = dominatesDownstream(W, rl.b, rl.a);
+      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_downstream", target: rl.a, other: rl.b, source: rl.source,
+        label: `${A.name}应位于${B.name}的下游${tag}`, pass: ok, measured: ok ? "顺流可达" : "两地不在同一水系的上下游", at: [W.P.pos[rl.a]] });
+    } else {
+      const d = travelDays(W, rl.a, rl.b), ok = d != null && d <= rl.days;
+      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_days", target: rl.a, other: rl.b, days: rl.days, source: rl.source,
+        label: `${A.name}到${B.name}不超过 ${rl.days} 天${tag}`, pass: ok, measured: d == null ? "陆路不可达" : `实测 ${d} 天`, at: [W.P.pos[rl.a]] });
+    }
+  }
   // for settlements that fail a placement constraint, work out whether the constraint set is satisfiable at all
   const conflicted = new Set();
   for (const s2 of spec.settlements) {
-    if (!C.some(c => c.status === "fail" && c.target === s2.id && ["req_unmet", "wrong_region", "no_ocean"].includes(c.code))) continue;
-    const cf = analyseConflict(W, s2);
+    if (!C.some(c => c.status === "fail" && c.target === s2.id && ["req_unmet", "wrong_region", "no_ocean", "rel_downstream", "rel_days"].includes(c.code))) continue;
+    const extra = (spec.relations || []).filter(rl => rl.a === s2.id)
+      .map(rl => rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days);
+    const cf = analyseConflict(W, s2, extra);
     if (!cf) continue;
     conflicted.add(s2.id);
     for (const c of C) {
       if (c.target !== s2.id || c.status !== "fail") continue;
-      const mine = c.code === "wrong_region" ? "region:" + s2.region : c.req;
+      const rl = (spec.relations || []).find(q => `spec.rel.${q.id}` === c.id);
+      const mine = c.code === "wrong_region" ? "region:" + s2.region
+        : rl ? (rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days) : c.req;
       if (mine && cf.core.includes(mine)) { c.conflict = cf; c.measured += `；冲突：${cf.reason}${cf.alternatives.length ? "，可选：" + cf.alternatives.join(" / ") : ""}`; }
     }
   }
@@ -679,8 +813,32 @@ function verify(W, lore) {
 }
 
 // ---------- tools ----------
-const MOVE_TARGETS = ["nearest_coast", "nearest_river", "nearest_river_mouth", "nearest_lake", "near_mountain", "flattest_nearby"];
-const TARGET_REQ = { nearest_coast: "coast", nearest_river: "on_river", nearest_river_mouth: "river_mouth", nearest_lake: "lakeside", near_mountain: "near_mountain" };
+const MOVE_TARGETS = ["nearest_coast", "nearest_river", "nearest_river_mouth", "nearest_lake", "near_mountain", "flattest_nearby", "accessible", "defensible"];
+const TARGET_REQ = { nearest_coast: "coast", nearest_river: "on_river", nearest_river_mouth: "river_mouth", nearest_lake: "lakeside", near_mountain: "near_mountain", accessible: "accessible", defensible: "defensible" };
+// cells the water leaving b flows through, so a site there is downstream of b
+function downstreamMask(W, sid) {
+  W._dsm = W._dsm || {};
+  if (W._dsm[sid]) return W._dsm[sid];
+  const m = new Uint8Array(NN), start = riverAt(W, posIdx(W, sid));
+  if (start) {
+    let c = start.cell;
+    for (let k = 0; k < 4000 && c >= 0 && !W.ocean[c]; k++) {
+      const x = c % N, y = (c - x) / N;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx >= 0 && yy >= 0 && xx < N && yy < N && dx * dx + dy * dy <= 4) m[yy * N + xx] = 1;
+      }
+      c = W.hy.down[c];
+    }
+  }
+  W._dsm[sid] = m; return m;
+}
+function withinDaysMask(W, sid, days) {
+  travelDays(W, sid, sid);
+  const dist = W.travel.get(sid), m = new Uint8Array(NN), budget = days * KM_PER_DAY / KM_PER_CELL;
+  for (let i = 0; i < NN; i++) if (dist[i] <= budget) m[i] = 1;
+  return m;
+}
 const TOOL_DOC = `fill_depressions()  — switch hydrology to priority-flood: depressions fill into lakes that overflow, so every river reaches an outlet.
 recompute_climate()  — replace noise moisture with an orographic model driven by wind_from (creates rain shadows).
 raise_ridge(region, amount)  — raise the mountain ridge in a region (amount 0.02–0.2); creates a ridge if none exists there.
@@ -733,9 +891,11 @@ function moveSettlement(W, a) {
   let targets = a.args.targets ?? a.args.target ?? [];
   if (!Array.isArray(targets)) targets = [targets];
   targets = targets.map(String);
-  const reqs = [], regions = []; let flattest = false;
+  const reqs = [], regions = [], masks = []; let flattest = false;
   for (const t of targets) {
     if (t.startsWith("region:")) { const r = t.slice(7); if (REGIONS.includes(r)) regions.push(r); }
+    else if (t.startsWith("downstream:")) { const o = t.slice(11); if (W.P.pos[o]) masks.push(downstreamMask(W, o)); }
+    else if (t.startsWith("near:")) { const [o, d] = t.slice(5).split("@"); if (W.P.pos[o]) masks.push(withinDaysMask(W, o, +d || 5)); }
     else if (TARGET_REQ[t]) reqs.push(TARGET_REQ[t]);
     else if (t === "flattest_nearby") flattest = true;
   }
@@ -750,6 +910,7 @@ function moveSettlement(W, a) {
       if (regions.length && !regions.includes(regionOf(x, y))) continue;
       let ok = true; for (const q of reqs) if (!REQ_TEST[q](W, i)) { ok = false; break; }
       if (!ok) continue;
+      if (masks.some(m => !m[i])) continue;
       if (others.some(o => Math.hypot(o[0] - x, o[1] - y) < 14)) continue;
       const d = Math.hypot(x - x0, y - y0); if (flattest && d > 20) continue;
       const sc = d + (flattest ? slopeAt(W, i) * 800 : 0);
@@ -766,7 +927,7 @@ function moveSettlement(W, a) {
 }
 
 // ---------- scripted policies (offline stand-ins for the LLM) ----------
-const REQ_TARGET = { coast: "nearest_coast", on_river: "nearest_river", river_mouth: "nearest_river_mouth", lakeside: "nearest_lake", near_mountain: "near_mountain" };
+const REQ_TARGET = { coast: "nearest_coast", on_river: "nearest_river", river_mouth: "nearest_river_mouth", lakeside: "nearest_lake", near_mountain: "near_mountain", accessible: "accessible", defensible: "defensible" };
 const CLAIM_TARGET = { coastal: "nearest_coast", on_river: "nearest_river", lakeside: "nearest_lake", near_mountain: "near_mountain" };
 function scriptedStructured(W, report, history) {
   const acts = [], notes = []; const P = W.P;
@@ -789,6 +950,8 @@ function scriptedStructured(W, report, history) {
         push("carve_basin", { region: reg }); notes.push(`湖泊不足 → 在${REGION_ZH[reg]}部挖盆地`); break;
       }
       case "no_ocean": push("declare_unsatisfiable", { check_id: v.id, reason: "规格没有海，港口无法临海" }); notes.push("内陆区域不可能有港口 → 声明无法满足"); break;
+      case "rel_downstream": (settleT[v.target] = settleT[v.target] || new Set()).add("downstream:" + v.other); notes.push(`${v.label} → 沿水系下移`); break;
+      case "rel_days": (settleT[v.target] = settleT[v.target] || new Set()).add("near:" + v.other + "@" + v.days); notes.push(`${v.label} → 向目标方向迁移`); break;
       case "req_unmet": case "underwater": case "steep": case "wrong_region": case "lore_claim": {
         const s = W.spec.settlements.find(q => q.id === v.target); if (!s) break;
         settleT[s.id] = settleT[s.id] || new Set();
@@ -854,11 +1017,12 @@ function mapFacts(W) {
   }
   return {
     region: W.spec.name,
-    settlements: S.map(s => settlementFacts(W, s)),
+    settlements: S.map(s => ({ ...settlementFacts(W, s), ...geoProfile(W, s.id) })),
     rivers: W.hy.rivers.map(r => ({ id: r.id, name: r.name, length_km: r.lengthKm, ends: r.kind === "sea" ? `在${REGION_ZH[r.mouthRegion]}部入海` : "流出图幅", passes: r.regions.map(x => REGION_ZH[x]) })),
     lakes: W.hy.lakes.map(l => ({ id: l.id, name: l.name, region: REGION_ZH[l.region] })),
     mountains: W.spec.mountains.map(m => ({ id: m.id, name: m.name, region: REGION_ZH[m.region] })),
     pairs,
+    geography_notes: "accessibility 0-1 为地形通达度，defensibility 0-1 为制高与隘口优势，road_centrality 为路网中转比重，hinterland_cells 为一天半路程内可达的陆地格数（1 格 = 2 km）",
   };
 }
 const FLAVOR = {
@@ -894,5 +1058,5 @@ function scriptedLoreEntry(W, s, k, mode) {
 }
 function scriptedLore(W, mode) { return W.spec.settlements.map((s, k) => scriptedLoreEntry(W, s, k, mode)); }
 
-if (typeof module !== "undefined") module.exports = { N, NN, normalizeSpec, initParams, derive, verify, applyActions, scriptedStructured, scriptedBlind, scriptedLore, scriptedLoreEntry, mapFacts, checkClaim, REGION_ZH, cellXY, regionOf };
+if (typeof module !== "undefined") module.exports = { N, NN, normalizeSpec, initParams, derive, verify, applyActions, scriptedStructured, scriptedBlind, scriptedLore, scriptedLoreEntry, mapFacts, checkClaim, REGION_ZH, cellXY, regionOf , geoProfile, geoFields, roadCentrality, hinterland, dominatesDownstream};
 // ===================== END CORE =====================

@@ -2,6 +2,7 @@
 // Generates a test set, runs one repair loop per trial with a pluggable policy, and records metrics.
 // No DOM and no rendering here, so the same code runs in node and in the page.
 
+const BENCH_POOL = 30;        // the canonical test set size; always slice from this pool so T0xx is stable
 const BENCH_NAMES = {
   city: ["白石城", "银门", "长风城", "高台城", "落日城", "铁砧城"],
   port: ["盐湾", "北锚", "潮门", "雾港", "鲸背港", "石梁港"],
@@ -100,7 +101,10 @@ async function runTrial(trial, policy, opts = {}) {
   }).join(" ; ");
   const expected = trial.expectUnsat;
   const tp = declared.filter(d => expected.includes(d)).length;
+  const lastAnalysis = hist.length ? String(hist[hist.length - 1].analysis || "").slice(0, 160) : "";
   Object.assign(rec, {
+    final_codes: [...new Set(rep.fails.map(f => f.code))].join("|"),
+    last_analysis: lastAnalysis,
     final: rep.fails.length, iters: traj.length - 1, converged: rep.fails.length === 0 ? 1 : 0,
     rate: +rep.rate.toFixed(3), traj: traj.join(">"), stopped,
     actions: actionsTotal, actions_failed: actionsFailed, wasted_iters: wasted,

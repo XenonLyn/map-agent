@@ -1,0 +1,13 @@
+trial,cat,policy,init,final_codes,last_analysis,final,iters,converged,rate,traj,stopped,actions,actions_failed,wasted_iters,regressions,oscillations,declared,declared_cores,unsat_expected,unsat_tp,unsat_fp,unsat_fn,ms
+T001,simple,rule-structured,5,,松脚村：不能建在水里 → 移动。,0,2,1,1,5>1>0,converged,5,0,0,1,0,0,,0,0,0,0,7815
+T002,simple,rule-structured,4,,河道终止在洼地 → 填洼；大河数量不足 → 降低河流阈值；北锚：需要临海、需要位于河口 → 移动。,0,1,1,1,4>0,converged,3,0,0,0,0,0,,0,0,0,0,4403
+T003,simple,rule-structured,2,,冷泉村多次移动失败 → 声明无法满足。,0,3,1,1,2>1>1>0,converged,4,1,1,1,0,1,phys.dry.S2=?,0,0,1,0,9201
+T004,simple,rule-structured,2,,河道终止在洼地 → 填洼；大河数量不足 → 降低河流阈值。,0,1,1,1,2>0,converged,2,0,0,0,0,0,,0,0,0,0,3926
+T005,simple,rule-structured,5,,鲸背港：位于北部 + 位于河口 无法同时满足 → 声明无法满足（建议改到东北、东、东南部）。,0,3,1,1,5>1>1>0,converged,6,1,1,1,0,2,spec.req.S1.river_mouth=region:N+river_mouth ; spec.region.S1=region:N+river_mouth,0,0,2,0,24033
+T006,multi,rule-structured,9,,铁门堡附近山地不够 → 抬高山脊；铁门堡：应在东部 → 移动。,0,2,1,1,9>1>0,converged,10,1,0,1,0,1,spec.req.S1.coast=region:N+coast,0,0,1,0,14785
+T007,multi,rule-structured,9,mountain_weak,西北部山地不足 → 抬高山脊。,1,6,0,0.968,9>5>2>1>1>1>1,max_iter,22,4,3,4,0,0,,0,0,0,0,17832
+T008,multi,rule-structured,9,,北锚：位于东北部 + 位于河口 无法同时满足 → 声明无法满足（建议改到西南、南、东南部）。,0,3,1,1,9>2>1>0,converged,11,1,0,2,0,2,spec.req.S1.river_mouth=region:NE+river_mouth ; spec.region.S1=region:NE+river_mouth,0,0,2,0,26392
+T009,multi,rule-structured,5,,陶市附近山地不够 → 抬高山脊；陶市：应在中部 → 移动；枫桥镇：不能建在水里 → 移动。,0,2,1,1,5>2>0,converged,8,1,0,2,0,0,,0,0,0,0,8439
+T010,contradictory,rule-structured,8,,雾港：位于西南部 + 位于河口 无法同时满足 → 声明无法满足（建议改到西北、北、东北部）。,0,3,1,1,8>1>1>0,converged,8,1,1,1,0,2,spec.req.S1.river_mouth=region:SW+river_mouth ; spec.region.S1=region:SW+river_mouth,0,0,2,0,24680
+T011,contradictory,rule-structured,6,,河道终止在洼地 → 填洼；大河数量不足 → 降低河流阈值；鲸背港：位于西北部 + 临海 无法同时满足 → 声明无法满足（建议改到西南、南、东南部）；枫桥镇：需要临湖 → 移动；断墙堡：需要靠近山脉 → 移动；无潮港：位于西北部 + 临海 无法同时满足 → 声明无法满足（建议改到西南、南、东南部）。,0,1,1,1,6>0,converged,6,0,0,0,0,2,spec.req.S1.coast=region:NW+coast ; spec.req.S7.coast=region:NW+coast,0,0,2,0,16553
+T012,contradictory,rule-structured,10,,断墙堡附近山地不够 → 抬高山脊；断墙堡：应在东南部 → 移动。,0,5,1,1,10>4>3>4>1>0,converged,29,10,1,6,2,3,spec.req.S1.river_mouth=region:NE+river_mouth ; spec.req.S8.coast=region:NW+coast ; spec.region.S1=region:NE+river_mouth,0,0,3,0,46550
