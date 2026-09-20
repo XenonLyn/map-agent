@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>区域地图 Agent 演示</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+:root {
+  --paper: #e7ebe5; --panel: #f5f7f2; --line: #c9d0c8; --ink: #1f2b2e; --muted: #56666a;
+  --chart: #2e6a70; --chart-soft: #d6e5e4; --flag: #b4235f; --flag-soft: #f6dde7;
+  --lore: #9a6710; --lore-soft: #f3e7cf; --ok: #2f7a4b; --ok-soft: #dcefe2;
+  --serif: "Noto Serif SC", "Songti SC", "STSong", serif;
+  --sans: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #151d20; --panel: #1c262a; --line: #33434a; --ink: #e2e8e4; --muted: #9aaaa8;
+    --chart: #74b7bb; --chart-soft: #20383b; --flag: #f0709f; --flag-soft: #3d1f2c;
+    --lore: #dcae58; --lore-soft: #3a2f1b; --ok: #6cc28f; --ok-soft: #1c3526; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #151d20; --panel: #1c262a; --line: #33434a; --ink: #e2e8e4; --muted: #9aaaa8;
+  --chart: #74b7bb; --chart-soft: #20383b; --flag: #f0709f; --flag-soft: #3d1f2c;
+  --lore: #dcae58; --lore-soft: #3a2f1b; --ok: #6cc28f; --ok-soft: #1c3526; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.6 var(--sans); }
+h1, h2, h3 { font-family: var(--serif); font-weight: 600; margin: 0; }
+button, select, input, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--chart); outline-offset: 2px; }
+
+.top { padding: 28px clamp(16px, 3vw, 40px) 18px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 24px; align-items: end; border-bottom: 1px solid var(--line); }
+.top h1 { font-size: clamp(28px, 3.4vw, 40px); line-height: 1.15; letter-spacing: 0.02em; }
+.lede { margin: 0; color: var(--muted); max-width: 62ch; grid-column: 1; }
+#agentStatus { grid-column: 2; grid-row: 1 / span 2; max-width: 34ch; font-size: 13px; color: var(--muted); padding-left: 12px; border-left: 3px solid var(--line); }
+#agentStatus[data-state="ok"] { border-color: var(--ok); }
+
+.grid { display: grid; grid-template-columns: 290px minmax(0, 1fr) 370px; gap: 16px; padding: 16px clamp(16px, 3vw, 40px) 40px; align-items: start; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px; min-width: 0; }
+.panel h2 { font-size: 19px; display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.step { font-family: var(--serif); font-size: 13px; width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--ink); display: inline-grid; place-items: center; flex: none; transform: translateY(-2px); }
+.lore-panel { grid-column: 1 / -1; }
+.city-panel { grid-column: 1 / span 2; }
+.city-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.city-tabs button { display: inline-flex; gap: 6px; align-items: baseline; padding: 4px 10px; font-size: 13.5px; border-color: var(--line); font-family: var(--serif); font-weight: 600; }
+.city-tabs button small { font-family: var(--sans); font-weight: 400; color: var(--muted); font-size: 11.5px; }
+.city-tabs button[aria-pressed="true"] { border-color: var(--ink); background: var(--chart-soft); }
+.city-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 16px; align-items: start; }
+#cityCanvas { width: 100%; height: auto; aspect-ratio: 1; display: block; border: 1px solid var(--line); border-radius: 4px; background: #e9ece6; }
+.city-wrap aside h3 { font-size: 22px; }
+#citySub { font-size: 13px; color: var(--muted); margin: 4px 0 12px; }
+.city-wrap aside h4 { font-size: 14px; margin: 14px 0 6px; font-family: var(--serif); }
+#cityLegend, #cityLandmarks { list-style: none; padding: 0; margin: 0; display: grid; gap: 3px; font-size: 13px; }
+#cityLegend li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 3px; cursor: default; }
+#cityLegend li:hover { background: var(--paper); }
+#cityLegend b { font-weight: 500; color: var(--muted); font-variant-numeric: tabular-nums; }
+.sw { width: 16px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
+.sw.road { background: #fff3c9; border: 2px solid #b9a67f; height: 8px; }
+.sw.wall { background: #6a6255; height: 5px; }
+#cityLandmarks li { display: flex; gap: 8px; }
+#cityLandmarks .ic { width: 16px; text-align: center; color: var(--muted); }
+#cityLandmarks .meta { color: var(--muted); margin-top: 6px; }
+#cityFly { margin-top: 14px; }
+.l3.town { pointer-events: auto; cursor: pointer; padding: 1px 6px; border-radius: 3px; }
+.l3.town:hover { background: rgba(244,246,240,0.85); }
+.l3.town.sel { background: #1f2b2e; color: #f4f6f0; text-shadow: none; }
+.hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+
+label.f { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+select, input[type=number], textarea { width: 100%; border: 1px solid var(--line); background: var(--paper); border-radius: 4px; padding: 7px 8px; }
+textarea { resize: vertical; line-height: 1.55; font-size: 14px; }
+fieldset { border: 0; padding: 0; margin: 12px 0 0; }
+legend { font-size: 13px; color: var(--muted); padding: 0; margin-bottom: 4px; }
+.radio { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; font-size: 14px; }
+.radio input { margin-top: 5px; accent-color: var(--chart); }
+.radio small { display: block; color: var(--muted); font-size: 12px; }
+.radio input:disabled + span { opacity: 0.5; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btns { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
+button { border: 1px solid var(--ink); background: transparent; border-radius: 4px; padding: 7px 14px; cursor: pointer; }
+button.primary { background: var(--ink); color: var(--panel); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:not(:disabled):hover { background: var(--chart-soft); }
+button.primary:not(:disabled):hover { background: var(--chart); border-color: var(--chart); }
+#busy { font-size: 13px; color: var(--chart); }
+details { margin-top: 14px; }
+summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 8px; max-height: 320px; overflow: auto; }
+
+.mapbar { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 20px; margin-bottom: 10px; }
+#metrics { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 0; }
+#metrics dt { font-size: 12px; color: var(--muted); }
+#metrics dd { margin: 0; font-family: var(--serif); font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.layers { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; align-items: center; }
+.layers label { display: inline-flex; gap: 4px; align-items: center; }
+.layers select { width: auto; padding: 3px 6px; }
+.canvasbox { position: relative; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: #dfe4de; }
+#map { display: block; width: 100%; height: auto; aspect-ratio: 1; }
+#map[hidden], #view3d[hidden], #ctl3d[hidden] { display: none; }
+#view3d { position: relative; width: 100%; aspect-ratio: 1 / 0.9; background: radial-gradient(ellipse at 50% 30%, #eef2f1 0%, #d7e0e0 55%, #b9c6c8 100%); overflow: hidden; }
+#map3d { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
+#map3d:active { cursor: grabbing; }
+#labels3d { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.l3 { position: absolute; left: 0; top: 0; white-space: nowrap; font-family: var(--serif); color: #1f2b2e; text-shadow: 0 0 3px #f4f6f0, 0 0 3px #f4f6f0, 0 0 6px #f4f6f0; will-change: transform; }
+.l3.town { font-weight: 600; font-size: 14px; }
+.l3.t-city, .l3.t-port { font-size: 16px; }
+.l3.mtn { font-weight: 700; font-size: 16px; letter-spacing: 0.25em; }
+.l3.river { font-style: italic; font-size: 12.5px; color: #24506a; }
+.l3.region { font-family: var(--sans); font-size: 12px; color: rgba(31,43,46,0.55); }
+.l3.hl { color: #9a6710; }
+.l3.badge { font-family: var(--sans); font-size: 11px; font-weight: 600; color: #fff; background: #b4235f; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; text-shadow: none; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }
+.l3.badge.dec { background: #56666a; }
+.l3.badge.focus { width: 26px; height: 26px; font-size: 13px; outline: 3px solid rgba(180,35,95,0.35); }
+.viewbar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 13px; }
+.seg { display: inline-flex; border: 1px solid var(--ink); border-radius: 4px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 12px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+#ctl3d { display: inline-flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#ctl3d input[type=range] { width: 110px; accent-color: var(--chart); }
+#ctl3d button { padding: 4px 10px; font-size: 13px; }
+#histNote { position: absolute; top: 8px; right: 8px; background: var(--ink); color: var(--panel); font-size: 12px; padding: 3px 8px; border-radius: 3px; }
+.readout { font-size: 12px; color: var(--muted); margin: 6px 0 0; min-height: 1.6em; }
+#scrub { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.snap { display: inline-flex; gap: 8px; align-items: center; padding: 4px 10px; font-size: 13px; border-color: var(--line); }
+.snap b { font-weight: 600; color: var(--flag); font-variant-numeric: tabular-nums; }
+.snap[aria-pressed="true"] { border-color: var(--ink); background: var(--chart-soft); }
+.snap.edit span::before { content: "✎ "; }
+
+#trace { list-style: none; margin: 0 0 16px; padding: 0; max-height: 520px; overflow: auto; border-left: 2px solid var(--line); }
+.tr { padding: 4px 0 12px 14px; position: relative; font-size: 13.5px; }
+.tr::before { content: ""; position: absolute; left: -6px; top: 10px; width: 10px; height: 10px; border-radius: 50%; background: var(--panel); border: 2px solid var(--chart); }
+.tr.edit::before, .tr.lore::before { border-color: var(--lore); }
+.tr.error::before { border-color: var(--flag); }
+.tr.done::before { background: var(--chart); }
+.tr-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.tr-title { font-weight: 600; }
+.tr-count { color: var(--flag); font-variant-numeric: tabular-nums; }
+.tr-llm { font-size: 12px; color: var(--muted); }
+.tr p { margin: 2px 0 0; }
+.pending { color: var(--chart); }
+.pending::after { content: " ▍"; animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pending::after { animation: none; } }
+.acts { list-style: none; padding: 0; margin: 6px 0 0; display: grid; gap: 4px; }
+.acts li { display: grid; gap: 1px; padding: 4px 8px; background: var(--chart-soft); border-radius: 3px; }
+.acts li.bad { background: var(--flag-soft); }
+.acts code { font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+.acts span { font-size: 12px; color: var(--muted); }
+
+#p-verify h3 { font-size: 15px; margin: 4px 0 6px; }
+.ck-sum { font-size: 13px; margin: 0 0 6px; }
+.ck-sum .f { color: var(--flag); font-weight: 600; }
+.ck-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; }
+.ck { display: grid; grid-template-columns: 22px 34px minmax(0, 1fr); gap: 6px; align-items: start; padding: 5px 6px; border-radius: 3px; cursor: pointer; font-size: 13px; }
+.ck:hover, .ck.focus { background: var(--paper); }
+.ck.focus { outline: 1.5px solid var(--flag); }
+.ck-n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: #fff; background: var(--flag); margin-top: 1px; }
+.ck.pass .ck-n { background: transparent; border: 1.5px solid var(--ok); }
+.ck.declared .ck-n { background: var(--muted); }
+.ck-cat { font-size: 11.5px; color: var(--muted); padding-top: 2px; }
+.ck-body { display: grid; }
+.ck-meas { color: var(--muted); font-size: 12px; }
+.ck.pass .ck-meas { display: none; }
+
+#loreLog { margin: 10px 0 14px; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.lore-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.card { border: 1px solid var(--line); border-top: 3px solid var(--lore); background: var(--paper); border-radius: 4px; padding: 12px 14px; }
+.card h3 { font-size: 17px; margin-bottom: 6px; }
+.lore-text { font-family: var(--serif); line-height: 1.8; margin: 0 0 10px; }
+.ent { color: var(--lore); border-bottom: 1px dotted var(--lore); cursor: default; font-weight: 600; }
+.claims { list-style: none; margin: 0; padding: 8px 0 0; border-top: 1px dashed var(--line); display: grid; gap: 4px; font-size: 12.5px; }
+.cl { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 6px; }
+.cl-tag { font-size: 11px; text-align: center; border-radius: 3px; padding: 1px 0; align-self: start; }
+.cl.ok .cl-tag { background: var(--ok-soft); color: var(--ok); }
+.cl.false .cl-tag { background: var(--flag-soft); color: var(--flag); }
+.cl.stale .cl-tag { background: var(--lore-soft); color: var(--lore); }
+.cl em { display: block; font-style: normal; color: var(--muted); }
+.empty { color: var(--muted); font-size: 14px; }
+#editResult { font-size: 13px; margin: 12px 0 0; padding: 8px 10px; background: var(--paper); border-radius: 4px; min-height: 2.4em; }
+.edit-group { padding: 10px 0; border-bottom: 1px dashed var(--line); }
+.edit-group:last-of-type { border-bottom: 0; }
+.edit-group .row select { flex: 1 1 110px; width: auto; }
+.note { font-size: 12px; color: var(--muted); margin: 14px 0 0; }
+
+@media (max-width: 1180px) {
+  .grid { grid-template-columns: minmax(0, 1fr); }
+  .lore-panel, .city-panel { grid-column: auto; }
+  .city-wrap { grid-template-columns: minmax(0, 1fr); }
+  .top { grid-template-columns: minmax(0, 1fr); }
+  #agentStatus { grid-column: 1; grid-row: auto; max-width: none; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>区域地图 Agent</h1>
+  <p class="lede">把一段世界观描述变成地形、水系和聚落，由验证器找出物理规律与设定上的矛盾，再让 agent 调用生成工具逐轮修正。写好的世界观会被逐条对照地图核查。</p>
+  <p id="agentStatus">正在检测 Claude 是否可用</p>
+</header>
+<main class="grid">
+  <section class="panel" aria-labelledby="h1s">
+    <h2 id="h1s"><span class="step">1</span>描述与设置</h2>
+    <label class="f" for="preset">预设</label>
+    <select id="preset"></select>
+    <p class="hint" style="margin:6px 0 0">图幅 1024 × 1024 km，512 × 512 格，北在上。</p>
+    <label class="f" for="desc">世界观描述</label>
+    <textarea id="desc" rows="9"></textarea>
+    <fieldset>
+      <legend>规划与修正由谁完成</legend>
+      <label class="radio"><input type="radio" name="engine" value="offline" id="engOff" checked><span>离线脚本策略<small>即时运行，按违规类型套规则，用来模拟 agent</small></span></label>
+      <label class="radio"><input type="radio" name="engine" value="claude" id="engClaude" disabled><span>Claude<small>规划器、修正器、设定作者都是真实模型调用，每轮约 10–60 秒；本地重建地图每轮约 1 秒</small></span></label>
+      <div id="tierWrap" hidden><label class="f" for="tier">模型档位</label><select id="tier"><option value="default">default（更准）</option><option value="quick">quick（更快）</option></select></div>
+    </fieldset>
+    <label class="f" for="feedback">验证器给 agent 的反馈</label>
+    <select id="feedback">
+      <option value="structured">结构化违规报告</option>
+      <option value="binary">只告诉通过或不通过</option>
+      <option value="none">不反馈，只生成一次</option>
+    </select>
+    <label class="f" for="maxIter">最多迭代轮数</label>
+    <input type="number" id="maxIter" value="6" min="1" max="10">
+    <div class="btns"><button class="primary" id="run">生成并修正</button><button id="stop" hidden>停止</button><span id="busy" aria-live="polite"></span></div>
+    <details><summary>当前 WorldSpec</summary><pre id="specView">（运行后显示）</pre></details>
+  </section>
+
+  <section class="panel" aria-label="地图">
+    <div class="viewbar">
+      <div class="seg" role="group" aria-label="视图"><button type="button" data-view="3d" aria-pressed="true">3D 沙盘</button><button type="button" data-view="2d" aria-pressed="false">平面地图</button></div>
+      <span id="ctl3d"><label>地形夸张 <input type="range" id="exag" min="0.5" max="3" step="0.1" value="1.6"></label><button type="button" id="camReset">斜视</button><button type="button" id="camTop">俯视</button><span class="hint" style="margin:0">拖动旋转，滚轮缩放，Shift 或右键拖动平移；点击城镇名可飞过去</span></span>
+    </div>
+    <div class="mapbar">
+      <dl id="metrics"></dl>
+      <div class="layers">
+        <label>底图 <select data-layer="base"><option value="biome">生物群系</option><option value="elev">高程</option></select></label>
+        <label><input type="checkbox" data-layer="rivers" checked>水系</label>
+        <label><input type="checkbox" data-layer="settle" checked>聚落</label>
+        <label><input type="checkbox" data-layer="marks" checked>违规标记</label>
+        <label><input type="checkbox" data-layer="grid" checked>分区</label>
+      </div>
+    </div>
+    <div class="canvasbox"><canvas id="map" width="1024" height="1024" aria-label="生成的区域地图（平面）"></canvas><div id="view3d" hidden><canvas id="map3d" tabindex="0" aria-label="生成的区域地图（3D 沙盘，可用方向键旋转）"></canvas><div id="labels3d"></div></div><span id="histNote" hidden>正在看历史快照；编辑总是基于最新一版</span></div>
+    <p class="readout" id="readout">把鼠标移到地图上查看格点信息。</p>
+    <div id="scrub" aria-label="迭代快照"></div>
+  </section>
+
+  <section class="panel" id="p-verify" aria-labelledby="h2s">
+    <h2 id="h2s"><span class="step">2</span>验证与修正</h2>
+    <ol id="trace"></ol>
+    <h3>检查结果</h3>
+    <div id="checks"></div>
+  </section>
+
+  <section class="panel city-panel" aria-labelledby="h3c">
+    <h2 id="h3c"><span class="step">3</span>城市详图</h2>
+    <p class="hint">每个聚落都会按地形、水系和进城道路生成规划：先划分功能片区，街道网格对齐主干道，再放置广场、教堂、医院等地标。点击地图上的城镇也能切换到这里。把鼠标移到图例上可以单独突出某一类片区。</p>
+    <div class="city-tabs" id="cityTabs" role="group" aria-label="选择聚落"></div>
+    <div class="city-wrap">
+      <canvas id="cityCanvas" width="900" height="900" aria-label="城市规划详图"></canvas>
+      <aside>
+        <h3 id="cityTitle"></h3>
+        <p id="citySub"></p>
+        <h4>功能区</h4>
+        <ul id="cityLegend"></ul>
+        <h4>地标</h4>
+        <ul id="cityLandmarks"></ul>
+        <button type="button" id="cityFly">在 3D 沙盘中查看</button>
+      </aside>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="h4s">
+    <h2 id="h4s"><span class="step">4</span>局部编辑</h2>
+    <p class="hint">修改地图后，只重新计算受影响的部分，并把被推翻的设定标为过期。然后可以选择改设定，或让地图服从设定。</p>
+    <div class="edit-group">
+      <div class="row"><select id="editS" aria-label="聚落"></select><select id="editR" aria-label="目标区域"></select></div>
+      <div class="btns" style="margin-top:8px"><button id="moveBtn">移动聚落</button></div>
+    </div>
+    <div class="edit-group">
+      <div class="row"><select id="ridgeR" aria-label="区域"></select><button id="ridgeBtn">在此隆起山脊</button></div>
+    </div>
+    <div class="edit-group">
+      <div class="btns" style="margin-top:0"><button id="rewriteBtn">重写过期设定</button><button id="obeyBtn">让地图服从设定</button></div>
+    </div>
+    <p id="editResult" aria-live="polite">先生成地图和世界观，再来这里修改。</p>
+    <p class="note">离线模式下的规划、修正和写作都是规则脚本，只用于展示流程；切换到 Claude 才是真正的 LLM agent。</p>
+  </section>
+
+  <section class="panel lore-panel" aria-labelledby="h3s">
+    <h2 id="h3s"><span class="step">5</span>世界观与地图联动</h2>
+    <p class="hint">设定作者只能通过地图查询工具获取地理事实，文中用实体引用指向地图对象。每条地理描述都会变成可核查的声明；把鼠标移到卡片或金色名字上，地图会标出对应位置。</p>
+    <div class="btns" style="margin-top:0"><button id="loreBtn">生成世界观</button></div>
+    <ul id="loreLog"></ul>
+    <div id="lore" class="lore-grid"></div>
+  </section>
+
+
+</main>
+<script>
+/*__SCRIPT__*/
+</script>
+</body>
+</html>
