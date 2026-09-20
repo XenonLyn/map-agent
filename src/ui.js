@@ -66,6 +66,13 @@ function initControls() {
   document.querySelectorAll("[data-view]").forEach(b => b.onclick = () => setViewMode(b.dataset.view));
   $("#exag").oninput = e => { if (V3) { V3.exag = +e.target.value; if (S.view === "3d") update3D(); } };
   $("#camReset").onclick = () => { setView("oblique"); };
+  $("#gmFog").onchange = e => { GM.fog = e.target.checked; renderGameMap(true); };
+  $("#gmRedraw").onclick = () => renderGameMap(true);
+  const gm = $("#gmCanvas");
+  gm.addEventListener("click", e => { const ic = gmPick(e); if (ic) { S.city = ic.sid; renderCity(); gmFocus(GM.focus === ic.sid ? null : ic.sid); } });
+  $("#gmAll").onclick = () => gmFocus(null);
+  $("#gmZoom").onclick = () => gmFocus(S.city);
+  gm.addEventListener("mousemove", e => { const ic = gmPick(e); gm.style.cursor = ic ? "pointer" : "default"; if (GM.hover !== ic) { GM.hover = ic; renderGameMap(); } });
   $("#camTop").onclick = () => { setView("top"); };
 }
 const READOUT_HINT = "把鼠标移到地图上查看格点信息。";
@@ -75,13 +82,15 @@ function showCell(W, x, y) {
   $("#readout").textContent = `${REGION_ZH[regionOf(x, y)]}部，距西界 ${x * KM_PER_CELL} km、北界 ${y * KM_PER_CELL} km；${elev}，湿度 ${W.moist[i].toFixed(2)}，${BIOME_ZH[W.biome[i]]}${W.hy.channel[i] && !W.hy.lake[i] ? "，河道" : ""}`;
 }
 function setViewMode(v) {
-  if (v === "3d" && !(V3 && (V3.ok || init3D()))) v = "2d";
+  if ((v === "3d" || v === "game") && !(V3 && (V3.ok || init3D()))) v = "2d";
   S.view = v;
   document.querySelectorAll("[data-view]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.view === v)));
   $("#map").hidden = v !== "2d";
   $("#view3d").hidden = v !== "3d";
   $("#ctl3d").hidden = v !== "3d";
-  $("#readout").textContent = READOUT_HINT;
+  $("#gamemap").hidden = v !== "game";
+  $("#ctlgame").hidden = v !== "game";
+  $("#readout").textContent = v === "game" ? "俯视渲染叠加探索迷雾与图标；点击城镇图标可在下方查看它的规划详图。" : READOUT_HINT;
   if (v === "3d") resize3D();
   renderMap();
 }
@@ -728,6 +737,7 @@ function halo(ctx, text, x, y, font, color, align = "left") {
 }
 function renderMap() {
   if (S.view === "3d" && V3 && V3.ok) { update3D(); return; }
+  if (S.view === "game" && V3 && V3.ok) { renderGameMap(); return; }
   render2D();
 }
 function render2D() {

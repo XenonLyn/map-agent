@@ -103,7 +103,12 @@ pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid v
 .layers select { width: auto; padding: 3px 6px; }
 .canvasbox { position: relative; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; background: #dfe4de; }
 #map { display: block; width: 100%; height: auto; aspect-ratio: 1; }
-#map[hidden], #view3d[hidden], #ctl3d[hidden] { display: none; }
+#map[hidden], #view3d[hidden], #ctl3d[hidden], #gamemap[hidden], #ctlgame[hidden] { display: none; }
+#gamemap { background: #0b0a08; }
+#gmCanvas { display: block; width: 100%; height: auto; aspect-ratio: 1; cursor: pointer; }
+#ctlgame { display: inline-flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+#ctlgame button { padding: 4px 10px; font-size: 13px; }
+#ctlgame label { display: inline-flex; gap: 4px; align-items: center; }
 #view3d { position: relative; width: 100%; aspect-ratio: 1 / 0.9; background: radial-gradient(ellipse at 50% 30%, #eef2f1 0%, #d7e0e0 55%, #b9c6c8 100%); overflow: hidden; }
 #map3d { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 #map3d:active { cursor: grabbing; }
@@ -232,7 +237,8 @@ pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid v
 
   <section class="panel" aria-label="地图">
     <div class="viewbar">
-      <div class="seg" role="group" aria-label="视图"><button type="button" data-view="3d" aria-pressed="true">3D 沙盘</button><button type="button" data-view="2d" aria-pressed="false">平面地图</button></div>
+      <div class="seg" role="group" aria-label="视图"><button type="button" data-view="3d" aria-pressed="true">3D 沙盘</button><button type="button" data-view="2d" aria-pressed="false">平面地图</button><button type="button" data-view="game" aria-pressed="false">游戏地图</button></div>
+      <span id="ctlgame" hidden><button type="button" id="gmAll">区域图</button><button type="button" id="gmZoom">聚焦城镇</button><label><input type="checkbox" id="gmFog" checked>探索迷雾</label><button type="button" id="gmRedraw">重新渲染</button><span class="hint" style="margin:0">点击传送点图标可放大该城镇，再点一次返回</span></span>
       <span id="ctl3d"><label>地形夸张 <input type="range" id="exag" min="0.5" max="3" step="0.1" value="1.6"></label><button type="button" id="camReset">斜视</button><button type="button" id="camTop">俯视</button><span class="hint" style="margin:0">拖动旋转，滚轮缩放，Shift 或右键拖动平移；点击城镇名可飞过去</span></span>
     </div>
     <div class="mapbar">
@@ -245,7 +251,7 @@ pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid v
         <label><input type="checkbox" data-layer="grid" checked>分区</label>
       </div>
     </div>
-    <div class="canvasbox"><canvas id="map" width="1024" height="1024" aria-label="生成的区域地图（平面）"></canvas><div id="view3d" hidden><canvas id="map3d" tabindex="0" aria-label="生成的区域地图（3D 沙盘，可用方向键旋转）"></canvas><div id="labels3d"></div></div><span id="histNote" hidden>正在看历史快照；编辑总是基于最新一版</span></div>
+    <div class="canvasbox"><canvas id="map" width="1024" height="1024" aria-label="生成的区域地图（平面）"></canvas><div id="view3d" hidden><canvas id="map3d" tabindex="0" aria-label="生成的区域地图（3D 沙盘，可用方向键旋转）"></canvas><div id="labels3d"></div></div><div id="gamemap" hidden><canvas id="gmCanvas" width="1600" height="1600" aria-label="游戏风格地图"></canvas></div><span id="histNote" hidden>正在看历史快照；编辑总是基于最新一版</span></div>
     <p class="readout" id="readout">把鼠标移到地图上查看格点信息。</p>
     <div id="scrub" aria-label="迭代快照"></div>
   </section>

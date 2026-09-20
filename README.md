@@ -11,6 +11,7 @@ The whole app is one self-contained page: `dist/region-map-agent.html`. Open it 
 | `src/core.js` | Terrain (noise, ridges, valley carving, thermal erosion), climate, hydrology (D8 / priority-flood), biomes, verifier, repair tools, scripted policies, lore claims |
 | `src/presets.js` | Four example WorldSpecs (coast, kingdom, island, contradictory landlocked port) |
 | `src/city.js` | Regional road network (A* + MST) and settlement plans: districts, streets, blocks, buildings, landmarks, farmland; 2D drawing |
+| `src/gamemap.js` | Game-style map view: tilted orthographic render of the 3D scene, fog of war, grid, waypoint/POI icons, region and town zoom levels |
 | `src/view3d.js` | three.js diorama: terrain mesh, water, city decals, instanced buildings, landmark models, camera controls |
 | `src/ui.js` | Agent loop, Claude calls (artifact `sample` capability), panels, 2D rendering, edits |
 | `src/template.html` | Page markup and CSS; `build.py` inlines the scripts at `/*__SCRIPT__*/` |
