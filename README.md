@@ -10,7 +10,7 @@ The whole app is one self-contained page: `dist/region-map-agent.html`. Open it 
 | --- | --- |
 | `src/core.js` | Terrain (noise, ridges, valley carving, thermal erosion), climate, hydrology (D8 / priority-flood), biomes, verifier, repair tools, scripted policies, lore claims |
 | `src/presets.js` | Four example WorldSpecs (coast, kingdom, island, contradictory landlocked port) |
-| `src/city.js` | Regional road network (A* + MST) and settlement plans: districts, streets, blocks, buildings, landmarks, farmland; 2D drawing |
+| `src/city.js` | Regional road network (A* + MST) and settlement plans: districts, streets, blocks, buildings, landmarks, farmland; the style profile that drives them; 2D drawing |
 | `src/gamemap.js` | Game-style map view: tilted orthographic render of the 3D scene, fog of war, grid, waypoint/POI icons, region and town zoom levels |
 | `src/view3d.js` | three.js diorama: terrain mesh, water, city decals, instanced buildings, landmark models, camera controls |
 | `src/ui.js` | Agent loop, Claude calls (artifact `sample` capability), panels, 2D rendering, edits |
@@ -50,5 +50,14 @@ python3 tests/screenshots.py 0
 
 - **Claude mode** uses the claude.ai artifact runtime (`window.claude.use("sample")`). Outside claude.ai only the offline scripted policies run. To use the API elsewhere, replace `llmJSON` in `src/ui.js` with your own backend call.
 - **Offline mode** is rule-based: it demonstrates the loop, not LLM ability.
+- **Style profile**: the intent layer (`llmPlan`) reads an era, a street pattern, block and building scale, a wall
+  policy and a landmark vocabulary off the description, and `cityPlan` in `src/city.js` builds the town from them.
+  `street_pattern` picks the road skeleton and what each district's block lattice lines up with — `organic` (noise-warped
+  districts, each aligned to its nearest main road), `grid` (one lattice through the whole town), `radial` (extra spokes,
+  blocks facing the centre), `ring` (concentric rings, blocks tangential), `terraced` (blocks follow the terrain contour).
+  `era` fixes the landmark vocabulary, so a medieval town gets a cathedral and a keep while a modern one gets a station,
+  a hospital and factories; a landmark outside the vocabulary is substituted by one with the same function or dropped.
+  Nothing here touches geography: the style decides how a settlement is drawn, never where it is, and the verifier's
+  checks are unchanged by it. Panel 4 has era / pattern / wall controls that re-plan the towns without re-running the agent.
 - **Scale**: 1 cell = 2 km. Settlements are drawn at an exaggerated, map-style scale (a city plan is about 28 km across).
 - **Scaling rule**: cell-based thresholds in `core.js` are tuned for N = 512. `SC = N / 256` scales most of them, but re-run `tests/test_core.js` after changing N.

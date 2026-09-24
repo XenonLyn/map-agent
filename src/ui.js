@@ -42,6 +42,7 @@ function initControls() {
   $("#loreBtn").onclick = () => genLore();
   $("#moveBtn").onclick = () => editMove();
   $("#ridgeBtn").onclick = () => editRidge();
+  $("#restyleBtn").onclick = () => restyle();
   $("#rewriteBtn").onclick = () => rewriteStale();
   $("#obeyBtn").onclick = () => obeyLore();
   document.querySelectorAll("[data-layer]").forEach(el => el.onchange = () => {
@@ -380,7 +381,7 @@ async function runAgent() {
     }
     S.spec = normalizeSpec(raw);
     $("#specView").textContent = JSON.stringify(S.spec, null, 2);
-    fillEditSelects();
+    fillEditSelects(); syncStyleControls();
     await frame();
     let W = derive(S.spec, initParams(S.spec));
     if (eng === "claude") {
@@ -519,6 +520,7 @@ function updateEditButtons() {
   const has = !!last();
   $("#moveBtn").disabled = S.running || !has || !S.spec.settlements.length;
   $("#ridgeBtn").disabled = S.running || !has;
+  $("#restyleBtn").disabled = S.running || !has || !S.spec.settlements.length;
   $("#loreBtn").disabled = S.running || !has || !S.spec.settlements.length;
   const hasLore = !!(S.lore && S.lore.length);
   $("#rewriteBtn").disabled = S.running || !hasLore;
@@ -536,6 +538,27 @@ function afterEdit(W0, r, label, what) {
   const msg = `${r.results.map(x => x.msg).join("；")}。地形未改动的格子 ${(same / NN * 100).toFixed(1)}%，河道变化 ${riverDiff} 格；${S.lore ? `新增过期声明 ${Math.max(0, staleAfter - staleBefore)} 条；` : ""}当前违规 ${rep.fails.length} 项。`;
   $("#editResult").textContent = msg;
   addTrace({ kind: "edit", title: "用户编辑", body: `${what}。${msg}` });
+}
+// ---------- city style: re-plan the settlements under a different style profile ----------
+function syncStyleControls() {
+  const st = (S.spec && S.spec.style) || STYLE_DEFAULT;
+  $("#styleEra").value = st.era; $("#stylePat").value = st.street_pattern; $("#styleWalls").value = st.walls;
+}
+function restyle() {
+  const sn = last(); if (!sn || S.running) return;
+  const prev = S.spec.style || STYLE_DEFAULT, era = $("#styleEra").value;
+  // an explicit landmark list belongs to the era it was written for; changing the era hands the choice back to the era vocabulary
+  const st = normalizeStyle({ ...prev, landmarks: era === prev.era ? prev.landmarks : null, era, street_pattern: $("#stylePat").value, walls: $("#styleWalls").value });
+  S.spec.style = st;
+  // every snapshot shares one spec object; the plans are cached per world, so drop them and let them be rebuilt
+  for (const s2 of S.snaps) { s2.W.spec.style = st; delete s2.W._plans; }
+  S.snapGen = (S.snapGen || 0) + 1;              // part of the 3D and game-map cache keys, so both rebuild their cities
+  S.city = null;
+  $("#specView").textContent = JSON.stringify(S.spec, null, 2);
+  const what = `${ERA_ZH[st.era]}·${PATTERN_ZH[st.street_pattern]}·城墙${{ auto: "按时代", always: "总是有", never: "不建" }[st.walls]}${era !== prev.era && prev.landmarks ? "（地标改用该时代的词表）" : ""}`;
+  $("#editResult").textContent = `城市风格改为「${what}」，正在重新规划聚落…（地形、水系和所有地理约束都没有改动）`;
+  addTrace({ kind: "edit", title: "城市风格", body: `改为 ${what}。只重画城镇，验证器的检查结果不变。` });
+  refreshAll();
 }
 function editMove() {
   const sn = last(); if (!sn || S.running) return;
@@ -768,7 +791,7 @@ function renderCity() {
   if (!plansReady(W)) { $("#citySub").textContent = "正在生成城市规划…"; const ctx = cv.getContext("2d"); ctx.clearRect(0, 0, cv.width, cv.height); $("#cityLegend").innerHTML = ""; $("#cityLandmarks").innerHTML = ""; schedulePlans(W); return; }
   const P = cityPlan(W, s);
   const f = settlementFacts(W, s);
-  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。`;
+  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。风格：${ERA_ZH[P.style.era]}·${PATTERN_ZH[P.style.street_pattern]}${P.walls.length ? "·有城墙" : ""}。`;
   drawCityDetail(W, P);
   const total = Object.values(P.zoneCells).reduce((a, b) => a + b, 0) || 1;
   const zones = Object.entries(P.zoneCells).sort((a, b) => b[1] - a[1]);

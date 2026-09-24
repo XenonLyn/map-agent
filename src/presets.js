@@ -4,6 +4,8 @@ const PRESETS = [
     spec: { name: "雾港海岸", seed: 1926, ocean_side: "E", wind_from: "W",
       mountains: [{ name: "鸦脊山", region: "W", orientation: "NS" }, { name: "寒丘", region: "NE", orientation: "EW" }],
       min_major_rivers: 3, min_lakes: 2,
+      style: { era: "modern", street_pattern: "organic", block_scale: 0.85, building_height: 1.3, walls: "never",
+        landmarks: ["plaza", "market", "church", "cityhall", "hospital", "school", "library", "station", "factory", "lighthouse"] },
       settlements: [
         { name: "灰锚港", type: "port", region: "E", requires: ["coast", "river_mouth"] },
         { name: "盐沼村", type: "village", region: "SE", requires: ["coast"] },
@@ -19,6 +21,7 @@ const PRESETS = [
     spec: { name: "双河王国", seed: 4417, ocean_side: "S", wind_from: "N",
       mountains: [{ name: "霜冠山脉", region: "N", orientation: "EW" }, { name: "赤岩岭", region: "E", orientation: "NS" }],
       min_major_rivers: 4, min_lakes: 0,
+      style: { era: "medieval", street_pattern: "organic", block_scale: 1, building_height: 1, walls: "auto" },
       settlements: [
         { name: "白塔城", type: "city", region: "C", requires: ["on_river"] },
         { name: "铁门堡", type: "fortress", region: "N", requires: ["near_mountain"] },
@@ -34,6 +37,8 @@ const PRESETS = [
     spec: { name: "潮汐群岛", seed: 3031, ocean_side: "all", wind_from: "E",
       mountains: [{ name: "灰烬脊", region: "C", orientation: "NS" }],
       min_major_rivers: 3, min_lakes: 1,
+      style: { era: "medieval", street_pattern: "terraced", block_scale: 0.8, building_height: 0.9, walls: "auto",
+        landmarks: ["plaza", "market", "chapel", "church", "cityhall", "lighthouse"] },
       settlements: [
         { name: "落潮港", type: "port", region: "W", requires: ["coast", "river_mouth"] },
         { name: "晨雾港", type: "port", region: "E", requires: ["coast"] },
@@ -46,6 +51,7 @@ const PRESETS = [
     spec: { name: "断碑高原", seed: 808, ocean_side: "none", wind_from: "W",
       mountains: [{ name: "断碑岭", region: "C", orientation: "EW" }],
       min_major_rivers: 2, min_lakes: 0,
+      style: { era: "medieval", street_pattern: "grid", block_scale: 1.15, building_height: 1, walls: "always" },
       settlements: [
         { name: "无潮港", type: "port", region: "E", requires: ["coast"] },
         { name: "石屋村", type: "village", region: "S", requires: ["near_mountain"] },

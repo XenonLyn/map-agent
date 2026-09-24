@@ -388,10 +388,10 @@ function buildCities3D(sn, plans) {
   const trees = new THREE.InstancedMesh(V3.geos.cone, V3.mats.tree, Math.max(1, nT));
   inst.castShadow = inst.receiveShadow = trees.castShadow = trees.receiveShadow = true;
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
-  const zc = {}; for (const [k, z] of Object.entries(ZONES)) if (z.bld) zc[k] = hexCol(z.bld, 0.1);
   const pierCol = new THREE.Color(0x7a5e40);
   let bi = 0, ti = 0;
   for (const P of plans) {
+    const zc = {}; for (const [k, z] of Object.entries(ZONES)) if (z.bld) zc[k] = hexCol(zoneBld(P.style, k), 0.1);   // era tint, per plan
     const [ox, oz] = [(P.CX / N - 0.5) * V3.SIZE, (P.CY / N - 0.5) * V3.SIZE];
     const base = V3.plateau[P.id] ?? 1;
     // high-resolution plan decal

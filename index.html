@@ -292,6 +292,17 @@ pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid v
       <div class="row"><select id="ridgeR" aria-label="区域"></select><button id="ridgeBtn">在此隆起山脊</button></div>
     </div>
     <div class="edit-group">
+      <div class="row">
+        <select id="styleEra" aria-label="时代"><option value="medieval">中世纪</option><option value="modern">近现代</option><option value="future">未来</option><option value="alien">异星</option></select>
+        <select id="stylePat" aria-label="街道形态"><option value="organic">有机街道</option><option value="grid">棋盘网格</option><option value="radial">放射状</option><option value="ring">环状</option><option value="terraced">等高线梯田</option></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="styleWalls" aria-label="城墙"><option value="auto">城墙：按时代</option><option value="always">城墙：总是有</option><option value="never">城墙：不建</option></select>
+        <button id="restyleBtn">按此风格重画城市</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0">风格档案由意图层（<code>llmPlan</code>）从描述里读出，只影响城镇怎么画，不影响任何地理约束。这里可以手动覆盖它来对比。</p>
+    </div>
+    <div class="edit-group">
       <div class="btns" style="margin-top:0"><button id="rewriteBtn">重写过期设定</button><button id="obeyBtn">让地图服从设定</button></div>
     </div>
     <p id="editResult" aria-live="polite">先生成地图和世界观，再来这里修改。</p>
@@ -1378,6 +1389,8 @@ const PRESETS = [
     spec: { name: "雾港海岸", seed: 1926, ocean_side: "E", wind_from: "W",
       mountains: [{ name: "鸦脊山", region: "W", orientation: "NS" }, { name: "寒丘", region: "NE", orientation: "EW" }],
       min_major_rivers: 3, min_lakes: 2,
+      style: { era: "modern", street_pattern: "organic", block_scale: 0.85, building_height: 1.3, walls: "never",
+        landmarks: ["plaza", "market", "church", "cityhall", "hospital", "school", "library", "station", "factory", "lighthouse"] },
       settlements: [
         { name: "灰锚港", type: "port", region: "E", requires: ["coast", "river_mouth"] },
         { name: "盐沼村", type: "village", region: "SE", requires: ["coast"] },
@@ -1393,6 +1406,7 @@ const PRESETS = [
     spec: { name: "双河王国", seed: 4417, ocean_side: "S", wind_from: "N",
       mountains: [{ name: "霜冠山脉", region: "N", orientation: "EW" }, { name: "赤岩岭", region: "E", orientation: "NS" }],
       min_major_rivers: 4, min_lakes: 0,
+      style: { era: "medieval", street_pattern: "organic", block_scale: 1, building_height: 1, walls: "auto" },
       settlements: [
         { name: "白塔城", type: "city", region: "C", requires: ["on_river"] },
         { name: "铁门堡", type: "fortress", region: "N", requires: ["near_mountain"] },
@@ -1408,6 +1422,8 @@ const PRESETS = [
     spec: { name: "潮汐群岛", seed: 3031, ocean_side: "all", wind_from: "E",
       mountains: [{ name: "灰烬脊", region: "C", orientation: "NS" }],
       min_major_rivers: 3, min_lakes: 1,
+      style: { era: "medieval", street_pattern: "terraced", block_scale: 0.8, building_height: 0.9, walls: "auto",
+        landmarks: ["plaza", "market", "chapel", "church", "cityhall", "lighthouse"] },
       settlements: [
         { name: "落潮港", type: "port", region: "W", requires: ["coast", "river_mouth"] },
         { name: "晨雾港", type: "port", region: "E", requires: ["coast"] },
@@ -1420,6 +1436,7 @@ const PRESETS = [
     spec: { name: "断碑高原", seed: 808, ocean_side: "none", wind_from: "W",
       mountains: [{ name: "断碑岭", region: "C", orientation: "EW" }],
       min_major_rivers: 2, min_lakes: 0,
+      style: { era: "medieval", street_pattern: "grid", block_scale: 1.15, building_height: 1, walls: "always" },
       settlements: [
         { name: "无潮港", type: "port", region: "E", requires: ["coast"] },
         { name: "石屋村", type: "village", region: "S", requires: ["near_mountain"] },
@@ -1451,6 +1468,46 @@ const LANDMARK = {
   station: { zh: "火车站", icon: "⊟" }, factory: { zh: "工厂", icon: "⌂" }, lighthouse: { zh: "灯塔", icon: "✦" },
   keep: { zh: "城堡主楼", icon: "♜" }, library: { zh: "图书馆", icon: "▤" },
 };
+
+// ---------- style profile (proposed by the intent layer) -> city-planner knobs ----------
+// street_pattern drives the road skeleton and what each district's block lattice lines up with.
+// warp: how far the district Voronoi is noise-warped   wobble: how much a main road meanders
+// mainF: multiplier on the number of radial mains      rings: ring-road radius fractions, per settlement type
+// lot: what the block lattice follows                  jitter: extra rotation allowed in low-density suburbs
+const PATTERN = {
+  organic:  { warp: 0.10, wobble: 0.12, mainF: 1.0, lot: "road",    jitter: 0.25,
+    rings: { city: [0.40, 0.76], port: [0.44], town: [0.52], fortress: [], village: [] } },
+  grid:     { warp: 0.01, wobble: 0.00, mainF: 1.0, lot: "global",  jitter: 0.00,
+    rings: { city: [], port: [], town: [], fortress: [], village: [] } },
+  radial:   { warp: 0.04, wobble: 0.03, mainF: 1.8, lot: "radial",  jitter: 0.06,
+    rings: { city: [0.52], port: [0.50], town: [0.55], fortress: [], village: [] } },
+  ring:     { warp: 0.05, wobble: 0.04, mainF: 0.6, lot: "tangent", jitter: 0.06,
+    rings: { city: [0.30, 0.52, 0.74], port: [0.34, 0.62], town: [0.40, 0.70], fortress: [0.6], village: [0.62] } },
+  terraced: { warp: 0.07, wobble: 0.06, mainF: 0.8, lot: "contour", jitter: 0.10,
+    rings: { city: [0.34, 0.56, 0.78], port: [0.38, 0.64], town: [0.45, 0.72], fortress: [], village: [0.60] } },
+};
+// the vocabulary each era can build, used when the spec does not list one of its own
+const ERA_LANDMARKS = {
+  medieval: ["plaza", "market", "cathedral", "church", "chapel", "cityhall", "keep", "lighthouse"],
+  modern:   ["plaza", "market", "church", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
+  future:   ["plaza", "market", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
+  alien:    ["plaza", "market", "cityhall", "keep", "library"],
+};
+// when the planner wants a landmark the vocabulary lacks, substitute one with the same function; no entry means drop it
+const LM_ALT = { cathedral: ["church", "chapel"], church: ["chapel", "cathedral"], chapel: ["church"], cityhall: ["keep"], keep: ["cityhall"], hospital: ["clinic"], clinic: ["hospital"], library: ["school"], school: ["library"] };
+// buildings drift towards an era colour; district (zoning) colours stay put so the legend keeps meaning the same thing
+const ERA_ZH = { medieval: "中世纪", modern: "近现代", future: "未来", alien: "异星" };
+const PATTERN_ZH = { organic: "有机街道", grid: "棋盘网格", radial: "放射状", ring: "环状", terraced: "等高线梯田" };
+const ERA_TINT = { medieval: null, modern: ["#8d96a3", 0.42], future: ["#9ec7da", 0.55], alien: ["#a98fb8", 0.5] };
+function mixHex(a, b, t) {
+  const px = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const [r1, g1, b1] = px(a), [r2, g2, b2] = px(b), q = v => Math.round(v).toString(16).padStart(2, "0");
+  return "#" + q(r1 + (r2 - r1) * t) + q(g1 + (g2 - g1) * t) + q(b1 + (b2 - b1) * t);
+}
+function zoneBld(style, zone) {
+  const base = ZONES[zone].bld, t = ERA_TINT[(style || STYLE_DEFAULT).era];
+  return t ? mixHex(base, t[0], t[1]) : base;
+}
 
 // ---------- sampling helpers ----------
 function bil(F, x, y) {
@@ -1591,6 +1648,10 @@ function cityPlan(W, s) {
   const [px, py] = W.P.pos[s.id], CX = px + 0.5, CY = py + 0.5;
   const r = rng((hashStr(s.id + s.name) ^ (W.P.seed * 2654435761)) >>> 0);
   const nzP = makePerlin(hashStr(s.name) % 100000);
+  // the intent layer's style profile: it decides how the town is laid out, never where it is
+  const style = (W.spec && W.spec.style) || STYLE_DEFAULT;
+  const pat = PATTERN[style.street_pattern] || PATTERN.organic;
+  const vocab = new Set(["plaza", ...(style.landmarks && style.landmarks.length ? style.landmarks : ERA_LANDMARKS[style.era] || ERA_LANDMARKS.medieval)]);
   const BT = new Float32Array(721);
   for (let k = 0; k <= 720; k++) { const th = k / 720 * Math.PI * 2; BT[k] = R * clamp(0.82 + 0.26 * nzP(Math.cos(th) * 1.2 + 5.5, Math.sin(th) * 1.2 + 5.5), 0.64, 1.0); }
   const bound = th => { let k = Math.round((th < 0 ? th + Math.PI * 2 : th) / (Math.PI * 2) * 720); return BT[k > 720 ? k - 720 : k]; };
@@ -1642,7 +1703,7 @@ function cityPlan(W, s) {
     const p = pts.find(([x, y]) => Math.hypot(x - CX, y - CY) > R * 0.95) || pts[pts.length - 1];
     angles.push(Math.atan2(p[1] - CY, p[0] - CX));
   }
-  const want = { city: 6, port: 5, town: 4, fortress: 2, village: 2 }[type];
+  const want = Math.max(2, Math.round({ city: 6, port: 5, town: 4, fortress: 2, village: 2 }[type] * pat.mainF));
   const landward = th => { for (const f of [0.35, 0.6, 0.85]) { const e = env[gidx(Math.cos(th) * R * f, Math.sin(th) * R * f)]; if (e === 2 || e === 4 && f < 0.7) return false; } return true; };
   for (let tries = 0; angles.length < want && tries < 60; tries++) {
     const th = r() * Math.PI * 2;
@@ -1653,7 +1714,7 @@ function cityPlan(W, s) {
   const trace = (f, th0, rStart, rEnd, step) => {
     const pts = [], bridges = []; let th = th0;
     for (let d = rStart; d <= rEnd; d += step) {
-      th = th0 + 0.12 * nzP(d * 0.35 + th0 * 3, 1.7);
+      th = th0 + pat.wobble * nzP(d * 0.35 + th0 * 3, 1.7);
       const u = Math.cos(th) * d, v = Math.sin(th) * d, e = env[gidx(u, v)];
       if (e === 2 && d > rStart + 0.5) break;
       pts.push([u, v]); if (e === 1) bridges.push(pts.length - 1);
@@ -1661,17 +1722,20 @@ function cityPlan(W, s) {
     return { pts, bridges };
   };
   for (const th of angles) { const t = trace(0, th, 0, bound(th) * 1.02, 0.25); if (t.pts.length > 3) mains.push({ ...t, kind: "main", th }); }
-  const ringF = { city: [0.4, 0.76], port: [0.44], town: [0.52], fortress: [], village: [] }[type];
-  const rings = [];
-  for (const f of ringF) {
-    let cur = [], bridges = [];
-    for (let deg = 0; deg <= 360; deg += 3) {
+  const th0 = mains.length ? mains[0].th : 0;
+  // one ring at radius fraction f, broken wherever it would run into water or leave the plan
+  const ringAt = (f, step = 3) => {
+    const segs = []; let cur = [], bridges = [];
+    for (let deg = 0; deg <= 360; deg += step) {
       const th = deg * Math.PI / 180, rr = f * bound(th) / 0.95, u = Math.cos(th) * rr, v = Math.sin(th) * rr, e = env[gidx(u, v)];
-      if (e === 2 || e === 4) { if (cur.length > 3) rings.push({ pts: cur, bridges, kind: "ring", f }); cur = []; bridges = []; continue; }
+      if (e === 2 || e === 4) { if (cur.length > 3) segs.push({ pts: cur, bridges, kind: "ring", f }); cur = []; bridges = []; continue; }
       cur.push([u, v]); if (e === 1) bridges.push(cur.length - 1);
     }
-    if (cur.length > 3) rings.push({ pts: cur, bridges, kind: "ring", f });
-  }
+    if (cur.length > 3) segs.push({ pts: cur, bridges, kind: "ring", f });
+    return segs;
+  };
+  const rings = [];
+  for (const f of pat.rings[type] || []) rings.push(...ringAt(f));
   const allRoads = [...mains, ...rings];
   // road distance raster (twice the district resolution), so each query is a lookup
   const G2 = G * 2, cg2 = cg / 2, rdist = new Float32Array(G2 * G2).fill(1e9);
@@ -1696,7 +1760,7 @@ function cityPlan(W, s) {
   for (let k = 0; k < G * G; k++) {
     if (env[k] !== 0) continue;
     let u = gu(k % G), v = gu(Math.floor(k / G));
-    const wu = u + 0.1 * R * nzP(u / R * 2.5 + 20, v / R * 2.5), wv = v + 0.1 * R * nzP(u / R * 2.5, v / R * 2.5 + 20);
+    const wu = u + pat.warp * R * nzP(u / R * 2.5 + 20, v / R * 2.5), wv = v + pat.warp * R * nzP(u / R * 2.5, v / R * 2.5 + 20);
     let best = 0, bd = 1e9;
     for (const sd of seeds) { const d = (sd.u - wu) ** 2 + (sd.v - wv) ** 2; if (d < bd) { bd = d; best = sd.i; } }
     dist[k] = best; seeds[best].n++;
@@ -1722,23 +1786,33 @@ function cityPlan(W, s) {
   } else {
     free().forEach(d => d.zone = d.dn < 0.72 ? "mil" : "sub");
   }
-  // grid orientation: follow the nearest main road
+  // lot orientation: the street pattern decides what each district's block lattice lines up with
+  const contourTh = (u, v) => {
+    const X = clamp(CX + u, 1, N - 2), Y = clamp(CY + v, 1, N - 2), i = Math.floor(Y) * N + Math.floor(X);
+    const gx = W.h[i + 1] - W.h[i - 1], gy = W.h[i + N] - W.h[i - N];
+    return Math.hypot(gx, gy) < 1e-5 ? null : Math.atan2(gy, gx) + Math.PI / 2;   // perpendicular to the gradient = along the contour
+  };
   for (const sd of seeds) {
-    let th = 0, bd = 9;
-    for (const m of mains) { const g2 = Math.abs(Math.atan2(Math.sin(sd.ang - m.th), Math.cos(sd.ang - m.th))); if (g2 < bd) { bd = g2; th = m.th; } }
-    sd.theta = th + (sd.zone === "sub" ? (r() - 0.5) * 0.25 : 0);
-    sd.off = [r(), r()];
+    let th = th0;
+    if (pat.lot === "road") { let bd = 9; for (const m of mains) { const g2 = Math.abs(Math.atan2(Math.sin(sd.ang - m.th), Math.cos(sd.ang - m.th))); if (g2 < bd) { bd = g2; th = m.th; } } }
+    else if (pat.lot === "radial") th = sd.ang;
+    else if (pat.lot === "tangent") th = sd.ang + Math.PI / 2;
+    else if (pat.lot === "contour") { const c2 = contourTh(sd.u, sd.v); if (c2 != null) th = c2; }
+    sd.theta = th + (sd.zone === "sub" ? (r() - 0.5) * pat.jitter : 0);
+    sd.off = pat.lot === "global" ? [0, 0] : [r(), r()];   // a shared offset is what makes a grid run through the whole town
   }
 
   // landmarks
   const landmarks = [];
   const okAt = (u, v) => { const gi = gidx(u, v); return gi >= 0 && env[gi] === 0; };
+  // the era (or the spec's own list) fixes the vocabulary; anything outside it is substituted or dropped
+  const resolveLM = k => { if (vocab.has(k)) return k; for (const alt of LM_ALT[k] || []) if (vocab.has(alt)) return alt; return null; };
   const place = (kind, u, v, w, h, rot, extra = {}) => {
+    const k2 = resolveLM(kind); if (!k2) return null;
     for (let t = 0; t < 12 && !okAt(u, v); t++) { u *= 0.85; v *= 0.85; }
     if (!okAt(u, v)) return null;
-    const L = { kind, u, v, w, h, rot, ...extra }; landmarks.push(L); return L;
+    const L = { kind: k2, u, v, w, h, rot, ...extra }; landmarks.push(L); return L;
   };
-  const th0 = mains.length ? mains[0].th : 0;
   const PS = { city: 1.3, port: 1.1, town: 0.9, village: 0.7, fortress: 1.1 }[type];
   const plaza = place("plaza", plazaSeed.u, plazaSeed.v, PS, PS, th0);
   const around = (L, side, gap) => { const a = L.rot + side * Math.PI / 2; return [L.u + Math.cos(a) * (L.w / 2 + gap), L.v + Math.sin(a) * (L.w / 2 + gap)]; };
@@ -1788,7 +1862,7 @@ function cityPlan(W, s) {
   for (let k = 0; k < G * G; k++) { const d = dist[k]; if (d < 0) continue; const u = gu(k % G), v = gu(Math.floor(k / G)), b = bbox[d]; b[0] = Math.min(b[0], u); b[1] = Math.min(b[1], v); b[2] = Math.max(b[2], u); b[3] = Math.max(b[3], v); }
   for (const sd of seeds) {
     const z = ZONES[sd.zone]; if (!z || !z.block) continue;
-    const sp = SP[sd.zone] * (type === "town" || type === "village" ? 1.08 : 1), st = ST[sd.zone];
+    const sp = SP[sd.zone] * (type === "town" || type === "village" ? 1.08 : 1) * style.block_scale, st = ST[sd.zone];
     const c = Math.cos(sd.theta), s2 = Math.sin(sd.theta);
     const b = bbox[sd.i]; if (b[0] > b[2]) continue;
     const corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(([u, v]) => [u * c + v * s2, -u * s2 + v * c]);
@@ -1811,7 +1885,7 @@ function cityPlan(W, s) {
       // lots
       const dn = Math.hypot(u, v) / R;
       const [hmin, hmax] = z.h;
-      const hgt = () => hmin + (hmax - hmin) * r() * (sd.zone === "core" ? (1 - 0.7 * dn) : 1);
+      const hgt = () => (hmin + (hmax - hmin) * r() * (sd.zone === "core" ? (1 - 0.7 * dn) : 1)) * style.building_height;
       const lots = small ? [[0, 0]] : sd.zone === "core" || sd.zone === "res" || sd.zone === "sub" ? [[-1, -1], [1, -1], [-1, 1], [1, 1]] : [[0, 0]];
       for (const [lx, ly] of lots) {
         if (sd.zone === "sub" && r() < 0.35) continue;
@@ -1851,12 +1925,13 @@ function cityPlan(W, s) {
       piers.push({ u: bu + Math.cos(a) * 0.35, v: bv + Math.sin(a) * 0.35, w: 0.8, d: 0.09, rot: a });
     }
   }
-  // walls: old town wall for cities, curtain wall for fortresses
+  // walls: "auto" gives every fortress a curtain wall, and a town wall only to eras that still build them
+  const walled = style.walls === "always" ? true : style.walls === "never" ? false
+    : type === "fortress" || (type === "city" && (style.era === "medieval" || style.era === "alien"));
   const walls = [];
-  for (const rg of rings) if (type === "city" && rg.f === 0.4) walls.push({ pts: rg.pts, gates: mains.map(m => m.th) });
-  if (type === "fortress") {
-    const pts = []; for (let deg = 0; deg <= 360; deg += 6) { const th = deg * Math.PI / 180, rr = 0.66 * bound(th); if (env[gidx(Math.cos(th) * rr, Math.sin(th) * rr)] === 0) pts.push([Math.cos(th) * rr, Math.sin(th) * rr]); }
-    if (pts.length > 6) walls.push({ pts, gates: mains.map(m => m.th) });
+  if (walled) {
+    const wf = type === "fortress" ? 0.63 : type === "village" ? 0.78 : type === "town" ? 0.60 : 0.40;
+    for (const seg of ringAt(wf, type === "fortress" ? 6 : 3)) if (seg.pts.length > 6) walls.push({ pts: seg.pts, gates: mains.map(m => m.th) });
   }
   // farmland: a rotated patchwork of parcels around the settlement (drawn on the regional map)
   const fields = [];
@@ -1879,7 +1954,7 @@ function cityPlan(W, s) {
   }
   const zoneCells = {};
   for (let k = 0; k < G * G; k++) if (dist[k] >= 0) { const z = seeds[dist[k]].zone; zoneCells[z] = (zoneCells[z] || 0) + 1; }
-  const plan = { id: s.id, name: s.name, type, R, CX, CY, EXT, G, cg, env, dist, seeds, mains, rings, blocks, buildings, landmarks, trees, stones, piers, walls, fields, zoneCells, bridges: [] };
+  const plan = { id: s.id, name: s.name, type, style, R, CX, CY, EXT, G, cg, env, dist, seeds, mains, rings, blocks, buildings, landmarks, trees, stones, piers, walls, fields, zoneCells, bridges: [] };
   W._plans[s.id] = plan;
   return plan;
 }
@@ -1970,7 +2045,7 @@ function drawPlan(ctx, W, P, opt) {
     for (const b of P.buildings) (bl[b.zone] = bl[b.zone] || []).push(b);
     for (const [z, list] of Object.entries(bl)) {
       ctx.globalAlpha = opt.hlZone && opt.hlZone !== z ? 0.35 : 1;
-      ctx.fillStyle = ZONES[z].bld; ctx.beginPath(); for (const b of list) rrect(ctx, b.u, b.v, b.w, b.d, b.rot); ctx.fill();
+      ctx.fillStyle = zoneBld(P.style, z); ctx.beginPath(); for (const b of list) rrect(ctx, b.u, b.v, b.w, b.d, b.rot); ctx.fill();
     }
   }
   ctx.globalAlpha = 1;
@@ -2708,10 +2783,10 @@ function buildCities3D(sn, plans) {
   const trees = new THREE.InstancedMesh(V3.geos.cone, V3.mats.tree, Math.max(1, nT));
   inst.castShadow = inst.receiveShadow = trees.castShadow = trees.receiveShadow = true;
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
-  const zc = {}; for (const [k, z] of Object.entries(ZONES)) if (z.bld) zc[k] = hexCol(z.bld, 0.1);
   const pierCol = new THREE.Color(0x7a5e40);
   let bi = 0, ti = 0;
   for (const P of plans) {
+    const zc = {}; for (const [k, z] of Object.entries(ZONES)) if (z.bld) zc[k] = hexCol(zoneBld(P.style, k), 0.1);   // era tint, per plan
     const [ox, oz] = [(P.CX / N - 0.5) * V3.SIZE, (P.CY / N - 0.5) * V3.SIZE];
     const base = V3.plateau[P.id] ?? 1;
     // high-resolution plan decal
@@ -3071,7 +3146,7 @@ function renderGameMap(force) {
   update3D();                                        // make sure terrain, cities and texture match this snapshot
   const ready = plansReady(W);
   if (!ready) schedulePlans(W);
-  const key = [S.snaps.indexOf(sn), S.layers.base, ready, GM.fog, V3.exag, S.city, GM.zoom, GM.focus].join();
+  const key = [S.snaps.indexOf(sn), S.layers.base, ready, GM.fog, V3.exag, S.city, GM.zoom, GM.focus, S.snapGen].join();
   if (!force && GM.key === key && GM.cache) { gmCompose(ctx, W, size, GM.cache, ready); return; }
   const shot = gmRenderScene(size);
   GM.cache = shot; GM.key = key;
@@ -3201,6 +3276,7 @@ function initControls() {
   $("#loreBtn").onclick = () => genLore();
   $("#moveBtn").onclick = () => editMove();
   $("#ridgeBtn").onclick = () => editRidge();
+  $("#restyleBtn").onclick = () => restyle();
   $("#rewriteBtn").onclick = () => rewriteStale();
   $("#obeyBtn").onclick = () => obeyLore();
   document.querySelectorAll("[data-layer]").forEach(el => el.onchange = () => {
@@ -3539,7 +3615,7 @@ async function runAgent() {
     }
     S.spec = normalizeSpec(raw);
     $("#specView").textContent = JSON.stringify(S.spec, null, 2);
-    fillEditSelects();
+    fillEditSelects(); syncStyleControls();
     await frame();
     let W = derive(S.spec, initParams(S.spec));
     if (eng === "claude") {
@@ -3678,6 +3754,7 @@ function updateEditButtons() {
   const has = !!last();
   $("#moveBtn").disabled = S.running || !has || !S.spec.settlements.length;
   $("#ridgeBtn").disabled = S.running || !has;
+  $("#restyleBtn").disabled = S.running || !has || !S.spec.settlements.length;
   $("#loreBtn").disabled = S.running || !has || !S.spec.settlements.length;
   const hasLore = !!(S.lore && S.lore.length);
   $("#rewriteBtn").disabled = S.running || !hasLore;
@@ -3695,6 +3772,27 @@ function afterEdit(W0, r, label, what) {
   const msg = `${r.results.map(x => x.msg).join("；")}。地形未改动的格子 ${(same / NN * 100).toFixed(1)}%，河道变化 ${riverDiff} 格；${S.lore ? `新增过期声明 ${Math.max(0, staleAfter - staleBefore)} 条；` : ""}当前违规 ${rep.fails.length} 项。`;
   $("#editResult").textContent = msg;
   addTrace({ kind: "edit", title: "用户编辑", body: `${what}。${msg}` });
+}
+// ---------- city style: re-plan the settlements under a different style profile ----------
+function syncStyleControls() {
+  const st = (S.spec && S.spec.style) || STYLE_DEFAULT;
+  $("#styleEra").value = st.era; $("#stylePat").value = st.street_pattern; $("#styleWalls").value = st.walls;
+}
+function restyle() {
+  const sn = last(); if (!sn || S.running) return;
+  const prev = S.spec.style || STYLE_DEFAULT, era = $("#styleEra").value;
+  // an explicit landmark list belongs to the era it was written for; changing the era hands the choice back to the era vocabulary
+  const st = normalizeStyle({ ...prev, landmarks: era === prev.era ? prev.landmarks : null, era, street_pattern: $("#stylePat").value, walls: $("#styleWalls").value });
+  S.spec.style = st;
+  // every snapshot shares one spec object; the plans are cached per world, so drop them and let them be rebuilt
+  for (const s2 of S.snaps) { s2.W.spec.style = st; delete s2.W._plans; }
+  S.snapGen = (S.snapGen || 0) + 1;              // part of the 3D and game-map cache keys, so both rebuild their cities
+  S.city = null;
+  $("#specView").textContent = JSON.stringify(S.spec, null, 2);
+  const what = `${ERA_ZH[st.era]}·${PATTERN_ZH[st.street_pattern]}·城墙${{ auto: "按时代", always: "总是有", never: "不建" }[st.walls]}${era !== prev.era && prev.landmarks ? "（地标改用该时代的词表）" : ""}`;
+  $("#editResult").textContent = `城市风格改为「${what}」，正在重新规划聚落…（地形、水系和所有地理约束都没有改动）`;
+  addTrace({ kind: "edit", title: "城市风格", body: `改为 ${what}。只重画城镇，验证器的检查结果不变。` });
+  refreshAll();
 }
 function editMove() {
   const sn = last(); if (!sn || S.running) return;
@@ -3927,7 +4025,7 @@ function renderCity() {
   if (!plansReady(W)) { $("#citySub").textContent = "正在生成城市规划…"; const ctx = cv.getContext("2d"); ctx.clearRect(0, 0, cv.width, cv.height); $("#cityLegend").innerHTML = ""; $("#cityLandmarks").innerHTML = ""; schedulePlans(W); return; }
   const P = cityPlan(W, s);
   const f = settlementFacts(W, s);
-  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。`;
+  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。风格：${ERA_ZH[P.style.era]}·${PATTERN_ZH[P.style.street_pattern]}${P.walls.length ? "·有城墙" : ""}。`;
   drawCityDetail(W, P);
   const total = Object.values(P.zoneCells).reduce((a, b) => a + b, 0) || 1;
   const zones = Object.entries(P.zoneCells).sort((a, b) => b[1] - a[1]);

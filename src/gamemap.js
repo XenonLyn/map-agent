@@ -175,7 +175,7 @@ function renderGameMap(force) {
   update3D();                                        // make sure terrain, cities and texture match this snapshot
   const ready = plansReady(W);
   if (!ready) schedulePlans(W);
-  const key = [S.snaps.indexOf(sn), S.layers.base, ready, GM.fog, V3.exag, S.city, GM.zoom, GM.focus].join();
+  const key = [S.snaps.indexOf(sn), S.layers.base, ready, GM.fog, V3.exag, S.city, GM.zoom, GM.focus, S.snapGen].join();
   if (!force && GM.key === key && GM.cache) { gmCompose(ctx, W, size, GM.cache, ready); return; }
   const shot = gmRenderScene(size);
   GM.cache = shot; GM.key = key;

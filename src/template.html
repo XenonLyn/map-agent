@@ -292,6 +292,17 @@ pre { font: 12px/1.45 var(--mono); background: var(--paper); border: 1px solid v
       <div class="row"><select id="ridgeR" aria-label="区域"></select><button id="ridgeBtn">在此隆起山脊</button></div>
     </div>
     <div class="edit-group">
+      <div class="row">
+        <select id="styleEra" aria-label="时代"><option value="medieval">中世纪</option><option value="modern">近现代</option><option value="future">未来</option><option value="alien">异星</option></select>
+        <select id="stylePat" aria-label="街道形态"><option value="organic">有机街道</option><option value="grid">棋盘网格</option><option value="radial">放射状</option><option value="ring">环状</option><option value="terraced">等高线梯田</option></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="styleWalls" aria-label="城墙"><option value="auto">城墙：按时代</option><option value="always">城墙：总是有</option><option value="never">城墙：不建</option></select>
+        <button id="restyleBtn">按此风格重画城市</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0">风格档案由意图层（<code>llmPlan</code>）从描述里读出，只影响城镇怎么画，不影响任何地理约束。这里可以手动覆盖它来对比。</p>
+    </div>
+    <div class="edit-group">
       <div class="btns" style="margin-top:0"><button id="rewriteBtn">重写过期设定</button><button id="obeyBtn">让地图服从设定</button></div>
     </div>
     <p id="editResult" aria-live="polite">先生成地图和世界观，再来这里修改。</p>

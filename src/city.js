@@ -22,6 +22,46 @@ const LANDMARK = {
   keep: { zh: "城堡主楼", icon: "♜" }, library: { zh: "图书馆", icon: "▤" },
 };
 
+// ---------- style profile (proposed by the intent layer) -> city-planner knobs ----------
+// street_pattern drives the road skeleton and what each district's block lattice lines up with.
+// warp: how far the district Voronoi is noise-warped   wobble: how much a main road meanders
+// mainF: multiplier on the number of radial mains      rings: ring-road radius fractions, per settlement type
+// lot: what the block lattice follows                  jitter: extra rotation allowed in low-density suburbs
+const PATTERN = {
+  organic:  { warp: 0.10, wobble: 0.12, mainF: 1.0, lot: "road",    jitter: 0.25,
+    rings: { city: [0.40, 0.76], port: [0.44], town: [0.52], fortress: [], village: [] } },
+  grid:     { warp: 0.01, wobble: 0.00, mainF: 1.0, lot: "global",  jitter: 0.00,
+    rings: { city: [], port: [], town: [], fortress: [], village: [] } },
+  radial:   { warp: 0.04, wobble: 0.03, mainF: 1.8, lot: "radial",  jitter: 0.06,
+    rings: { city: [0.52], port: [0.50], town: [0.55], fortress: [], village: [] } },
+  ring:     { warp: 0.05, wobble: 0.04, mainF: 0.6, lot: "tangent", jitter: 0.06,
+    rings: { city: [0.30, 0.52, 0.74], port: [0.34, 0.62], town: [0.40, 0.70], fortress: [0.6], village: [0.62] } },
+  terraced: { warp: 0.07, wobble: 0.06, mainF: 0.8, lot: "contour", jitter: 0.10,
+    rings: { city: [0.34, 0.56, 0.78], port: [0.38, 0.64], town: [0.45, 0.72], fortress: [], village: [0.60] } },
+};
+// the vocabulary each era can build, used when the spec does not list one of its own
+const ERA_LANDMARKS = {
+  medieval: ["plaza", "market", "cathedral", "church", "chapel", "cityhall", "keep", "lighthouse"],
+  modern:   ["plaza", "market", "church", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
+  future:   ["plaza", "market", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
+  alien:    ["plaza", "market", "cityhall", "keep", "library"],
+};
+// when the planner wants a landmark the vocabulary lacks, substitute one with the same function; no entry means drop it
+const LM_ALT = { cathedral: ["church", "chapel"], church: ["chapel", "cathedral"], chapel: ["church"], cityhall: ["keep"], keep: ["cityhall"], hospital: ["clinic"], clinic: ["hospital"], library: ["school"], school: ["library"] };
+// buildings drift towards an era colour; district (zoning) colours stay put so the legend keeps meaning the same thing
+const ERA_ZH = { medieval: "中世纪", modern: "近现代", future: "未来", alien: "异星" };
+const PATTERN_ZH = { organic: "有机街道", grid: "棋盘网格", radial: "放射状", ring: "环状", terraced: "等高线梯田" };
+const ERA_TINT = { medieval: null, modern: ["#8d96a3", 0.42], future: ["#9ec7da", 0.55], alien: ["#a98fb8", 0.5] };
+function mixHex(a, b, t) {
+  const px = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const [r1, g1, b1] = px(a), [r2, g2, b2] = px(b), q = v => Math.round(v).toString(16).padStart(2, "0");
+  return "#" + q(r1 + (r2 - r1) * t) + q(g1 + (g2 - g1) * t) + q(b1 + (b2 - b1) * t);
+}
+function zoneBld(style, zone) {
+  const base = ZONES[zone].bld, t = ERA_TINT[(style || STYLE_DEFAULT).era];
+  return t ? mixHex(base, t[0], t[1]) : base;
+}
+
 // ---------- sampling helpers ----------
 function bil(F, x, y) {
   x = clamp(x, 0, N - 1.001); y = clamp(y, 0, N - 1.001);
@@ -161,6 +201,10 @@ function cityPlan(W, s) {
   const [px, py] = W.P.pos[s.id], CX = px + 0.5, CY = py + 0.5;
   const r = rng((hashStr(s.id + s.name) ^ (W.P.seed * 2654435761)) >>> 0);
   const nzP = makePerlin(hashStr(s.name) % 100000);
+  // the intent layer's style profile: it decides how the town is laid out, never where it is
+  const style = (W.spec && W.spec.style) || STYLE_DEFAULT;
+  const pat = PATTERN[style.street_pattern] || PATTERN.organic;
+  const vocab = new Set(["plaza", ...(style.landmarks && style.landmarks.length ? style.landmarks : ERA_LANDMARKS[style.era] || ERA_LANDMARKS.medieval)]);
   const BT = new Float32Array(721);
   for (let k = 0; k <= 720; k++) { const th = k / 720 * Math.PI * 2; BT[k] = R * clamp(0.82 + 0.26 * nzP(Math.cos(th) * 1.2 + 5.5, Math.sin(th) * 1.2 + 5.5), 0.64, 1.0); }
   const bound = th => { let k = Math.round((th < 0 ? th + Math.PI * 2 : th) / (Math.PI * 2) * 720); return BT[k > 720 ? k - 720 : k]; };
@@ -212,7 +256,7 @@ function cityPlan(W, s) {
     const p = pts.find(([x, y]) => Math.hypot(x - CX, y - CY) > R * 0.95) || pts[pts.length - 1];
     angles.push(Math.atan2(p[1] - CY, p[0] - CX));
   }
-  const want = { city: 6, port: 5, town: 4, fortress: 2, village: 2 }[type];
+  const want = Math.max(2, Math.round({ city: 6, port: 5, town: 4, fortress: 2, village: 2 }[type] * pat.mainF));
   const landward = th => { for (const f of [0.35, 0.6, 0.85]) { const e = env[gidx(Math.cos(th) * R * f, Math.sin(th) * R * f)]; if (e === 2 || e === 4 && f < 0.7) return false; } return true; };
   for (let tries = 0; angles.length < want && tries < 60; tries++) {
     const th = r() * Math.PI * 2;
@@ -223,7 +267,7 @@ function cityPlan(W, s) {
   const trace = (f, th0, rStart, rEnd, step) => {
     const pts = [], bridges = []; let th = th0;
     for (let d = rStart; d <= rEnd; d += step) {
-      th = th0 + 0.12 * nzP(d * 0.35 + th0 * 3, 1.7);
+      th = th0 + pat.wobble * nzP(d * 0.35 + th0 * 3, 1.7);
       const u = Math.cos(th) * d, v = Math.sin(th) * d, e = env[gidx(u, v)];
       if (e === 2 && d > rStart + 0.5) break;
       pts.push([u, v]); if (e === 1) bridges.push(pts.length - 1);
@@ -231,17 +275,20 @@ function cityPlan(W, s) {
     return { pts, bridges };
   };
   for (const th of angles) { const t = trace(0, th, 0, bound(th) * 1.02, 0.25); if (t.pts.length > 3) mains.push({ ...t, kind: "main", th }); }
-  const ringF = { city: [0.4, 0.76], port: [0.44], town: [0.52], fortress: [], village: [] }[type];
-  const rings = [];
-  for (const f of ringF) {
-    let cur = [], bridges = [];
-    for (let deg = 0; deg <= 360; deg += 3) {
+  const th0 = mains.length ? mains[0].th : 0;
+  // one ring at radius fraction f, broken wherever it would run into water or leave the plan
+  const ringAt = (f, step = 3) => {
+    const segs = []; let cur = [], bridges = [];
+    for (let deg = 0; deg <= 360; deg += step) {
       const th = deg * Math.PI / 180, rr = f * bound(th) / 0.95, u = Math.cos(th) * rr, v = Math.sin(th) * rr, e = env[gidx(u, v)];
-      if (e === 2 || e === 4) { if (cur.length > 3) rings.push({ pts: cur, bridges, kind: "ring", f }); cur = []; bridges = []; continue; }
+      if (e === 2 || e === 4) { if (cur.length > 3) segs.push({ pts: cur, bridges, kind: "ring", f }); cur = []; bridges = []; continue; }
       cur.push([u, v]); if (e === 1) bridges.push(cur.length - 1);
     }
-    if (cur.length > 3) rings.push({ pts: cur, bridges, kind: "ring", f });
-  }
+    if (cur.length > 3) segs.push({ pts: cur, bridges, kind: "ring", f });
+    return segs;
+  };
+  const rings = [];
+  for (const f of pat.rings[type] || []) rings.push(...ringAt(f));
   const allRoads = [...mains, ...rings];
   // road distance raster (twice the district resolution), so each query is a lookup
   const G2 = G * 2, cg2 = cg / 2, rdist = new Float32Array(G2 * G2).fill(1e9);
@@ -266,7 +313,7 @@ function cityPlan(W, s) {
   for (let k = 0; k < G * G; k++) {
     if (env[k] !== 0) continue;
     let u = gu(k % G), v = gu(Math.floor(k / G));
-    const wu = u + 0.1 * R * nzP(u / R * 2.5 + 20, v / R * 2.5), wv = v + 0.1 * R * nzP(u / R * 2.5, v / R * 2.5 + 20);
+    const wu = u + pat.warp * R * nzP(u / R * 2.5 + 20, v / R * 2.5), wv = v + pat.warp * R * nzP(u / R * 2.5, v / R * 2.5 + 20);
     let best = 0, bd = 1e9;
     for (const sd of seeds) { const d = (sd.u - wu) ** 2 + (sd.v - wv) ** 2; if (d < bd) { bd = d; best = sd.i; } }
     dist[k] = best; seeds[best].n++;
@@ -292,23 +339,33 @@ function cityPlan(W, s) {
   } else {
     free().forEach(d => d.zone = d.dn < 0.72 ? "mil" : "sub");
   }
-  // grid orientation: follow the nearest main road
+  // lot orientation: the street pattern decides what each district's block lattice lines up with
+  const contourTh = (u, v) => {
+    const X = clamp(CX + u, 1, N - 2), Y = clamp(CY + v, 1, N - 2), i = Math.floor(Y) * N + Math.floor(X);
+    const gx = W.h[i + 1] - W.h[i - 1], gy = W.h[i + N] - W.h[i - N];
+    return Math.hypot(gx, gy) < 1e-5 ? null : Math.atan2(gy, gx) + Math.PI / 2;   // perpendicular to the gradient = along the contour
+  };
   for (const sd of seeds) {
-    let th = 0, bd = 9;
-    for (const m of mains) { const g2 = Math.abs(Math.atan2(Math.sin(sd.ang - m.th), Math.cos(sd.ang - m.th))); if (g2 < bd) { bd = g2; th = m.th; } }
-    sd.theta = th + (sd.zone === "sub" ? (r() - 0.5) * 0.25 : 0);
-    sd.off = [r(), r()];
+    let th = th0;
+    if (pat.lot === "road") { let bd = 9; for (const m of mains) { const g2 = Math.abs(Math.atan2(Math.sin(sd.ang - m.th), Math.cos(sd.ang - m.th))); if (g2 < bd) { bd = g2; th = m.th; } } }
+    else if (pat.lot === "radial") th = sd.ang;
+    else if (pat.lot === "tangent") th = sd.ang + Math.PI / 2;
+    else if (pat.lot === "contour") { const c2 = contourTh(sd.u, sd.v); if (c2 != null) th = c2; }
+    sd.theta = th + (sd.zone === "sub" ? (r() - 0.5) * pat.jitter : 0);
+    sd.off = pat.lot === "global" ? [0, 0] : [r(), r()];   // a shared offset is what makes a grid run through the whole town
   }
 
   // landmarks
   const landmarks = [];
   const okAt = (u, v) => { const gi = gidx(u, v); return gi >= 0 && env[gi] === 0; };
+  // the era (or the spec's own list) fixes the vocabulary; anything outside it is substituted or dropped
+  const resolveLM = k => { if (vocab.has(k)) return k; for (const alt of LM_ALT[k] || []) if (vocab.has(alt)) return alt; return null; };
   const place = (kind, u, v, w, h, rot, extra = {}) => {
+    const k2 = resolveLM(kind); if (!k2) return null;
     for (let t = 0; t < 12 && !okAt(u, v); t++) { u *= 0.85; v *= 0.85; }
     if (!okAt(u, v)) return null;
-    const L = { kind, u, v, w, h, rot, ...extra }; landmarks.push(L); return L;
+    const L = { kind: k2, u, v, w, h, rot, ...extra }; landmarks.push(L); return L;
   };
-  const th0 = mains.length ? mains[0].th : 0;
   const PS = { city: 1.3, port: 1.1, town: 0.9, village: 0.7, fortress: 1.1 }[type];
   const plaza = place("plaza", plazaSeed.u, plazaSeed.v, PS, PS, th0);
   const around = (L, side, gap) => { const a = L.rot + side * Math.PI / 2; return [L.u + Math.cos(a) * (L.w / 2 + gap), L.v + Math.sin(a) * (L.w / 2 + gap)]; };
@@ -358,7 +415,7 @@ function cityPlan(W, s) {
   for (let k = 0; k < G * G; k++) { const d = dist[k]; if (d < 0) continue; const u = gu(k % G), v = gu(Math.floor(k / G)), b = bbox[d]; b[0] = Math.min(b[0], u); b[1] = Math.min(b[1], v); b[2] = Math.max(b[2], u); b[3] = Math.max(b[3], v); }
   for (const sd of seeds) {
     const z = ZONES[sd.zone]; if (!z || !z.block) continue;
-    const sp = SP[sd.zone] * (type === "town" || type === "village" ? 1.08 : 1), st = ST[sd.zone];
+    const sp = SP[sd.zone] * (type === "town" || type === "village" ? 1.08 : 1) * style.block_scale, st = ST[sd.zone];
     const c = Math.cos(sd.theta), s2 = Math.sin(sd.theta);
     const b = bbox[sd.i]; if (b[0] > b[2]) continue;
     const corners = [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(([u, v]) => [u * c + v * s2, -u * s2 + v * c]);
@@ -381,7 +438,7 @@ function cityPlan(W, s) {
       // lots
       const dn = Math.hypot(u, v) / R;
       const [hmin, hmax] = z.h;
-      const hgt = () => hmin + (hmax - hmin) * r() * (sd.zone === "core" ? (1 - 0.7 * dn) : 1);
+      const hgt = () => (hmin + (hmax - hmin) * r() * (sd.zone === "core" ? (1 - 0.7 * dn) : 1)) * style.building_height;
       const lots = small ? [[0, 0]] : sd.zone === "core" || sd.zone === "res" || sd.zone === "sub" ? [[-1, -1], [1, -1], [-1, 1], [1, 1]] : [[0, 0]];
       for (const [lx, ly] of lots) {
         if (sd.zone === "sub" && r() < 0.35) continue;
@@ -421,12 +478,13 @@ function cityPlan(W, s) {
       piers.push({ u: bu + Math.cos(a) * 0.35, v: bv + Math.sin(a) * 0.35, w: 0.8, d: 0.09, rot: a });
     }
   }
-  // walls: old town wall for cities, curtain wall for fortresses
+  // walls: "auto" gives every fortress a curtain wall, and a town wall only to eras that still build them
+  const walled = style.walls === "always" ? true : style.walls === "never" ? false
+    : type === "fortress" || (type === "city" && (style.era === "medieval" || style.era === "alien"));
   const walls = [];
-  for (const rg of rings) if (type === "city" && rg.f === 0.4) walls.push({ pts: rg.pts, gates: mains.map(m => m.th) });
-  if (type === "fortress") {
-    const pts = []; for (let deg = 0; deg <= 360; deg += 6) { const th = deg * Math.PI / 180, rr = 0.66 * bound(th); if (env[gidx(Math.cos(th) * rr, Math.sin(th) * rr)] === 0) pts.push([Math.cos(th) * rr, Math.sin(th) * rr]); }
-    if (pts.length > 6) walls.push({ pts, gates: mains.map(m => m.th) });
+  if (walled) {
+    const wf = type === "fortress" ? 0.63 : type === "village" ? 0.78 : type === "town" ? 0.60 : 0.40;
+    for (const seg of ringAt(wf, type === "fortress" ? 6 : 3)) if (seg.pts.length > 6) walls.push({ pts: seg.pts, gates: mains.map(m => m.th) });
   }
   // farmland: a rotated patchwork of parcels around the settlement (drawn on the regional map)
   const fields = [];
@@ -449,7 +507,7 @@ function cityPlan(W, s) {
   }
   const zoneCells = {};
   for (let k = 0; k < G * G; k++) if (dist[k] >= 0) { const z = seeds[dist[k]].zone; zoneCells[z] = (zoneCells[z] || 0) + 1; }
-  const plan = { id: s.id, name: s.name, type, R, CX, CY, EXT, G, cg, env, dist, seeds, mains, rings, blocks, buildings, landmarks, trees, stones, piers, walls, fields, zoneCells, bridges: [] };
+  const plan = { id: s.id, name: s.name, type, style, R, CX, CY, EXT, G, cg, env, dist, seeds, mains, rings, blocks, buildings, landmarks, trees, stones, piers, walls, fields, zoneCells, bridges: [] };
   W._plans[s.id] = plan;
   return plan;
 }
@@ -540,7 +598,7 @@ function drawPlan(ctx, W, P, opt) {
     for (const b of P.buildings) (bl[b.zone] = bl[b.zone] || []).push(b);
     for (const [z, list] of Object.entries(bl)) {
       ctx.globalAlpha = opt.hlZone && opt.hlZone !== z ? 0.35 : 1;
-      ctx.fillStyle = ZONES[z].bld; ctx.beginPath(); for (const b of list) rrect(ctx, b.u, b.v, b.w, b.d, b.rot); ctx.fill();
+      ctx.fillStyle = zoneBld(P.style, z); ctx.beginPath(); for (const b of list) rrect(ctx, b.u, b.v, b.w, b.d, b.rot); ctx.fill();
     }
   }
   ctx.globalAlpha = 1;
