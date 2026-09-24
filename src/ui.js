@@ -21,10 +21,13 @@ const engine = () => document.querySelector('input[name="engine"]:checked').valu
     if (!s) throw 0;
     S.sample = s;
     $("#engClaude").disabled = false;
-    st.textContent = "Claude 可用：切换到 Claude 后，规划、修正和写设定都是真实模型调用（第一次调用会请求授权）";
+    st.textContent = "Claude 可用：切换到 Claude 后，规划、提议关系、冲突让步、修正和写设定都是真实模型调用（第一次调用会请求授权）";
     st.dataset.state = "ok";
   } catch {
-    st.textContent = "当前环境无法调用 Claude，只能使用离线脚本策略";
+    // window.claude is injected by the claude.ai artifact runtime; on a plain static host it simply is not there.
+    // Say that, rather than letting it read as a failure.
+    st.textContent = "这个页面不在 claude.ai 的 artifact 运行时里，取不到模型调用接口，所以只能跑离线脚本策略。"
+      + "把 dist/region-map-agent.html 作为 artifact 打开，Claude 选项就会解锁。";
     st.dataset.state = "off";
   }
 })();
@@ -42,6 +45,7 @@ function initControls() {
   $("#loreBtn").onclick = () => genLore();
   $("#moveBtn").onclick = () => editMove();
   $("#ridgeBtn").onclick = () => editRidge();
+  $("#styleEra").onchange = () => { $("#stylePat").value = ERA_DEFAULT[$("#styleEra").value].street_pattern; };
   $("#restyleBtn").onclick = () => restyle();
   $("#rewriteBtn").onclick = () => rewriteStale();
   $("#obeyBtn").onclick = () => obeyLore();
@@ -254,10 +258,15 @@ async function llmRepair(W, rep, hist, fb, item) {
     sea_level: +W.P.sea.toFixed(2), hydrology: W.P.hydro, climate: W.P.climate, river_threshold: W.P.riverThr,
     ridges: W.P.ridges.map(r => ({ region: r.region, orientation: r.orientation, amp: +r.amp.toFixed(2) })),
     basins: W.P.basins.map(b => b.region), declared_unsatisfiable: W.P.unsat,
+    relaxed_constraints: (W.P.relaxed || []).map(r => ({ settlement: r.sid, was: r.item, now: r.to, why: r.reason })),
     settlement_regions: Object.fromEntries(W.spec.settlements.map(s => [s.id, regionOf(...W.P.pos[s.id])])),
   };
   const feedback = fb === "structured"
-    ? "Structured verifier report (failed checks only):\n" + JSON.stringify(rep.fails.map(f => ({ id: f.id, code: f.code, target: f.target, region: f.region, requirement: f.req, check: f.label, measured: f.measured, claim: f.claim })), null, 0)
+    ? "Structured verifier report (failed checks only):\n" + JSON.stringify(rep.fails.map(f => ({
+        id: f.id, code: f.code, target: f.target, region: f.region, requirement: f.req, item: f.item,
+        source: f.source, relaxed: f.relaxed || undefined, check: f.label, measured: f.measured, claim: f.claim,
+        conflict: f.conflict ? { core: f.conflict.core, reason: f.conflict.reason } : undefined,
+      })), null, 0)
     : "Verifier verdict: FAIL. No further detail is available in this condition.";
   const history = hist.slice(-3).map((h, k) => ({ round: hist.length - Math.min(3, hist.length) + k + 1, actions: h.actions, results: h.results.map(r => `${r.a.tool}: ${r.ok ? "ok" : "failed"} — ${r.msg}`) }));
   const prompt = `You are the repair agent in a regional-map generation loop. The generator is procedural; you can only change it through the tools below. After your actions the map is rebuilt and verified again.
@@ -280,9 +289,62 @@ Tools:
 ${TOOL_DOC}
 
 Reply with only JSON: {"analysis": "one or two sentences in Chinese explaining your plan", "actions": [{"tool": "<name>", "args": {...}}], "stop": false}
-Use the fewest edits that address the failures. Terrain and hydrology tools run before settlement moves within a round. If a move failed or kept a settlement outside its region, change the terrain (e.g. lower the river threshold, carve a basin) instead of repeating it. If a check cannot be satisfied at all, call declare_unsatisfiable with its id. Set "stop": true only when nothing useful is left to try.`;
+A check carrying a "conflict" has been proved unsatisfiable together with the rest of its core; a separate negotiator stage decides what to give up there, so do not spend edits on it. Use the fewest edits that address the failures. Terrain and hydrology tools run before settlement moves within a round. If a move failed or kept a settlement outside its region, change the terrain (e.g. lower the river threshold, carve a basin) instead of repeating it. If a check cannot be satisfied at all, call declare_unsatisfiable with its id. Set "stop": true only when nothing useful is left to try.`;
   const out = await llmJSON(prompt, "决定修正动作", item);
   return { analysis: String(out.analysis || ""), actions: Array.isArray(out.actions) ? out.actions : [], stop: !!out.stop };
+}
+
+// Stage 2'': conflict resolution. The solver has proved a set of constraints jointly unsatisfiable; this stage decides
+// which one to give up. It is the only stage that gets the original description, because ranking two constraints is a
+// question about authorial intent, and intent lives in the prose — the WorldSpec has already thrown it away.
+async function llmNegotiate(W, briefs, desc, item) {
+  const prompt = `You are the negotiator in a regional-map generation loop. A constraint solver has proved that some
+settlements carry constraints that cannot all hold at once, whatever the terrain tools do. Decide what to give up.
+
+The original description — the only place the author's intent is written down:
+<description>
+${String(desc || "").slice(0, 2000)}
+</description>
+
+Each conflict below lists a MINIMAL unsatisfiable core: remove any one item and the rest become satisfiable. For every
+item you get where it came from — "explicit" was written by the author, "proposed" was inferred by an earlier stage of
+this same agent and carries the reason that stage gave — and "can_become": what the item may be traded for. Each option
+carries two numbers: "cells_now" is how many sites satisfy it on the map as it stands, and "cells_after_tools" is how
+many could after the terrain tools do their best (digging a lake, raising a ridge, lowering the river threshold).
+An option with cells_now = 0 but cells_after_tools > 0 is reachable, but only by rebuilding terrain for it.
+${JSON.stringify(briefs.map(b => ({ target: b.target, name: b.name, type: b.type, conflict: b.reason, checks: b.checks, core: b.core })), null, 0)}
+
+Tool:
+${RELAX_DOC}
+
+Rules:
+- Yield a "proposed" constraint before an "explicit" one. A proposed constraint is this agent's own guess about what
+  the description implied; giving one up costs the author nothing. Say that plainly in the reason.
+- You may relax an "explicit" constraint, but only when the description itself supports the trade, and the reason must
+  name the words it rests on. Wanting the loop to converge is not a reason.
+- Prefer a swap over a drop wherever "can_become" offers one. A port that cannot reach the sea is still a port if it
+  sits on a river, and that keeps more of the author's intent than deleting the requirement.
+- Relax exactly ONE item per conflict. The core is minimal, so one is enough; a second throws away intent for nothing.
+- If every item in a core is explicit and the description gives you no ground to rank them, relax nothing and declare
+  that conflict's checks unsatisfiable instead of guessing.
+
+Reply with only JSON:
+{"analysis": "one or two sentences in Chinese saying what you traded and why",
+ "relaxations": [{"target": "S3", "item": "coast", "to": "on_river", "reason": "中文一句"}],
+ "declare": [{"check_id": "spec.req.S3.coast", "reason": "中文一句"}]}
+Use "to": null to drop an item outright. Leave either list empty when you have nothing to put in it.`;
+  const out = await llmJSON(prompt, "冲突让步决策", item);
+  const ids = new Set(briefs.flatMap(b => b.checks)), targets = new Set(briefs.map(b => b.target));
+  const actions = [];
+  for (const r of Array.isArray(out.relaxations) ? out.relaxations : []) {
+    if (!r || !targets.has(r.target)) continue;
+    actions.push({ tool: "relax_constraint", args: { target: r.target, item: String(r.item || ""), to: r.to == null ? null : String(r.to), reason: String(r.reason || "") } });
+  }
+  for (const d of Array.isArray(out.declare) ? out.declare : []) {
+    if (!d || !ids.has(d.check_id)) continue;
+    actions.push({ tool: "declare_unsatisfiable", args: { check_id: d.check_id, reason: String(d.reason || "") } });
+  }
+  return { analysis: String(out.analysis || ""), actions };
 }
 
 const CLAIM_DOC = `Claim objects (use entity ids):
@@ -339,11 +401,36 @@ function normalizeEntries(list, W, idOffset) {
 }
 
 // ---------- the agent loop ----------
-async function repairLoop(W, { fb, maxIter, withLore, eng, title }) {
+async function repairLoop(W, { fb, maxIter, withLore, eng, title, desc }) {
   const hist = [];
   let rep = verify(W, withLore ? activeLore() : null);
+  const negotiated = new Set();          // one negotiation per distinct conflict core, never the same core twice
   for (let it = 1; it <= maxIter; it++) {
     if (!rep.fails.length) { addTrace({ kind: "done", title: "全部检查通过", body: "验证器没有发现剩余违规，循环结束。" }); break; }
+    // Conflict resolution runs first: editing terrain towards a goal the solver has proved unreachable is wasted work.
+    // It does not consume an iteration — after yielding, the same round still gets its repair step.
+    if (fb === "structured") {
+      const briefs = conflictBriefs(W, rep).filter(b => !negotiated.has(b.key));
+      if (briefs.length) {
+        briefs.forEach(b => negotiated.add(b.key));
+        const ni = addTrace({ kind: "conflict", title: `${title} 第 ${it} 轮 · 冲突消解`, before: rep.fails.length,
+          body: briefs.map(b => `${b.name}：${b.reason}`).join("；") + "。" });
+        let dec = { analysis: "", actions: [] };
+        try { dec = eng === "claude" ? await llmNegotiate(W, briefs, desc, ni) : scriptedNegotiate(W, briefs); }
+        catch (e) { ni.body += ` 让步决策失败：${e.message || e}`; }
+        if (dec.actions.length) {
+          const r = applyActions(W, dec.actions);
+          hist.push({ actions: dec.actions, results: r.results });
+          W = r.W; rep = verify(W, withLore ? activeLore() : null);
+          if (dec.analysis) ni.body = dec.analysis;
+          ni.after = rep.fails.length;
+          ni.actions = r.results.map(x => ({ call: `${x.a.tool}(${Object.values(x.a.args || {}).map(v => JSON.stringify(v)).join(", ")})`, ok: x.ok, msg: x.msg }));
+          pushSnap(W, `${title}${it}让步`, "iter");
+          await frame();
+          if (!rep.fails.length) { addTrace({ kind: "done", title: "全部检查通过", body: "让步之后没有剩余违规，循环结束。" }); break; }
+        } else { ni.after = rep.fails.length; ni.body += "（agent 选择不让步）"; renderTrace(); }
+      }
+    }
     const item = addTrace({ kind: "iter", title: `${title} 第 ${it} 轮`, before: rep.fails.length });
     let pol;
     if (eng === "claude") pol = await llmRepair(W, rep, hist, fb, item);
@@ -400,7 +487,7 @@ async function runAgent() {
     addTrace({ kind: "build", title: "生成器", body: `按默认参数生成：噪声地形、噪声湿度、不填洼的 D8 水文。验证器发现 ${rep0.fails.length} 项违规。` });
     pushSnap(W, "初始", "init");
     if (fb === "none") addTrace({ kind: "done", title: "无反馈条件", body: "只生成一次，不进入修正循环。" });
-    else await repairLoop(W, { fb, maxIter, withLore: false, eng, title: "修正" });
+    else await repairLoop(W, { fb, maxIter, withLore: false, eng, title: "修正", desc });
   } catch (e) {
     addTrace({ kind: "error", title: "中断", body: e.message || String(e) });
   } finally {
@@ -503,7 +590,7 @@ async function obeyLore() {
   S.ctl = new AbortController(); setBusy(true, "修正地图中");
   try {
     const before = countBad();
-    const W = await repairLoop(sn.W, { fb: "structured", maxIter: 4, withLore: true, eng: engine(), title: "服从设定" });
+    const W = await repairLoop(sn.W, { fb: "structured", maxIter: 4, withLore: true, eng: engine(), title: "服从设定", desc: $("#desc").value.trim() });
     claimStatuses(W);
     const left = countBad();
     $("#editResult").textContent = `地图修正后，不符的设定从 ${before} 条变为 ${left} 条。${left ? "剩下的（路程、方位、地貌等）无法靠移动聚落解决，可以改用“重写过期设定”。" : ""}`;
@@ -546,16 +633,22 @@ function syncStyleControls() {
 }
 function restyle() {
   const sn = last(); if (!sn || S.running) return;
-  const prev = S.spec.style || STYLE_DEFAULT, era = $("#styleEra").value;
-  // an explicit landmark list belongs to the era it was written for; changing the era hands the choice back to the era vocabulary
-  const st = normalizeStyle({ ...prev, landmarks: era === prev.era ? prev.landmarks : null, era, street_pattern: $("#stylePat").value, walls: $("#styleWalls").value });
+  const prev = S.spec.style || STYLE_DEFAULT, era = $("#styleEra").value, newEra = era !== prev.era;
+  // The block scale, storey height and landmark list all belong to the era they were written for, so changing the
+  // era hands them back to that era's defaults (undefined makes normalizeStyle fill them in). The pattern select
+  // already moved with the era when it was picked, so it is read as-is and an explicit override still wins.
+  const st = normalizeStyle({
+    ...prev,
+    ...(newEra ? { block_scale: undefined, building_height: undefined, landmarks: null } : {}),
+    era, street_pattern: $("#stylePat").value, walls: $("#styleWalls").value,
+  });
   S.spec.style = st;
   // every snapshot shares one spec object; the plans are cached per world, so drop them and let them be rebuilt
   for (const s2 of S.snaps) { s2.W.spec.style = st; delete s2.W._plans; }
   S.snapGen = (S.snapGen || 0) + 1;              // part of the 3D and game-map cache keys, so both rebuild their cities
   S.city = null;
   $("#specView").textContent = JSON.stringify(S.spec, null, 2);
-  const what = `${ERA_ZH[st.era]}·${PATTERN_ZH[st.street_pattern]}·城墙${{ auto: "按时代", always: "总是有", never: "不建" }[st.walls]}${era !== prev.era && prev.landmarks ? "（地标改用该时代的词表）" : ""}`;
+  const what = `${ERA_ZH[st.era]}·${PATTERN_ZH[st.street_pattern]}·街区 ${st.block_scale}×·楼高 ${st.building_height}×·城墙${{ auto: "按时代", always: "总是有", never: "不建" }[st.walls]}${newEra ? "（尺度与地标词表改用该时代的默认值）" : ""}`;
   $("#editResult").textContent = `城市风格改为「${what}」，正在重新规划聚落…（地形、水系和所有地理约束都没有改动）`;
   addTrace({ kind: "edit", title: "城市风格", body: `改为 ${what}。只重画城镇，验证器的检查结果不变。` });
   refreshAll();
@@ -609,13 +702,16 @@ function renderChecks() {
   const el = $("#checks"); const sn = curSnap();
   if (!sn) { el.innerHTML = ""; return; }
   const rep = reportOf(sn);
-  const fails = rep.fails, declared = rep.checks.filter(c => c.status === "declared"), pass = rep.checks.filter(c => c.status === "pass");
-  const item = (c, n) => `<li class="ck ${c.status}${S.focus === c.id ? " focus" : ""}" data-id="${esc(c.id)}" tabindex="0">
+  const fails = rep.fails, declared = rep.checks.filter(c => c.status === "declared");
+  const traded = rep.checks.filter(c => c.status === "relaxed" || (c.relaxed && c.status !== "fail"));
+  const pass = rep.checks.filter(c => c.status === "pass" && !c.relaxed);
+  const item = (c, n) => `<li class="ck ${c.status}${c.relaxed ? " was-relaxed" : ""}${S.focus === c.id ? " focus" : ""}" data-id="${esc(c.id)}" tabindex="0">
       <span class="ck-n">${n ?? ""}</span><span class="ck-cat">${esc(c.cat)}</span>
       <span class="ck-body"><span class="ck-label">${esc(c.label)}</span><span class="ck-meas">${esc(c.measured)}</span></span></li>`;
   el.innerHTML = `
-    <p class="ck-sum">${sn.label}：${rep.checks.length} 项检查，<b class="f">${fails.length} 项违规</b>${declared.length ? `，${declared.length} 项已声明无法满足` : ""}</p>
+    <p class="ck-sum">${sn.label}：${rep.checks.length} 项检查，<b class="f">${fails.length} 项违规</b>${declared.length ? `，${declared.length} 项已声明无法满足` : ""}${traded.length ? `，${traded.length} 项已让步` : ""}</p>
     <ol class="ck-list">${fails.map((c, k) => item(c, k + 1)).join("")}${declared.map(c => item(c, "×")).join("")}</ol>
+    ${traded.length ? `<details open><summary>${traded.length} 项让步（约束被换成更弱的，或被放弃）</summary><ol class="ck-list">${traded.map(c => item(c, "~")).join("")}</ol></details>` : ""}
     <details><summary>${pass.length} 项通过</summary><ol class="ck-list">${pass.map(c => item(c, "")).join("")}</ol></details>`;
   el.querySelectorAll(".ck").forEach(li => {
     const f = () => { S.focus = S.focus === li.dataset.id ? null : li.dataset.id; renderChecks(); renderMap(); };
@@ -791,7 +887,7 @@ function renderCity() {
   if (!plansReady(W)) { $("#citySub").textContent = "正在生成城市规划…"; const ctx = cv.getContext("2d"); ctx.clearRect(0, 0, cv.width, cv.height); $("#cityLegend").innerHTML = ""; $("#cityLandmarks").innerHTML = ""; schedulePlans(W); return; }
   const P = cityPlan(W, s);
   const f = settlementFacts(W, s);
-  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。风格：${ERA_ZH[P.style.era]}·${PATTERN_ZH[P.style.street_pattern]}${P.walls.length ? "·有城墙" : ""}。`;
+  $("#citySub").textContent = `${TYPE_ZH[s.type]}，位于${reg}部，${BIOME_ZH[f.biome]}${f.coastal ? "，临海" : ""}${f.river ? `，${nameOf(W, f.river)}流经` : ""}。图示范围约 ${Math.round(P.EXT * 2.7 * KM_PER_CELL)} km 见方，城镇按示意比例放大。风格：${ERA_ZH[P.style.era]}·${PATTERN_ZH[P.style.street_pattern]}·街区 ${P.style.block_scale}×·楼高 ${P.style.building_height}×${P.walls.length ? "·有城墙" : ""}。`;
   drawCityDetail(W, P);
   const total = Object.values(P.zoneCells).reduce((a, b) => a + b, 0) || 1;
   const zones = Object.entries(P.zoneCells).sort((a, b) => b[1] - a[1]);

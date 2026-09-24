@@ -77,14 +77,23 @@ function normalizeSpec(raw) {
   return out;
 }
 // Style profile: proposed by the intent layer, ignored by the structure layer, read by the city planner.
-const STYLE_DEFAULT = { era: "medieval", street_pattern: "organic", block_scale: 1, building_height: 1, walls: "auto", landmarks: null };
+// Each era carries a layout signature, so naming an era is enough to change how a town is drawn. An explicit
+// street_pattern / block_scale / building_height still wins — the era only fills in what the spec left out.
+const ERA_DEFAULT = {
+  medieval: { street_pattern: "organic",  block_scale: 1.0, building_height: 1.0 },   // tight organic lanes, low roofs
+  modern:   { street_pattern: "grid",     block_scale: 1.2, building_height: 1.8 },   // surveyed blocks, mid-rise
+  future:   { street_pattern: "radial",   block_scale: 1.5, building_height: 3.2 },   // few big superblocks, towers
+  alien:    { street_pattern: "terraced", block_scale: 0.8, building_height: 2.2 },   // fine terraces following the ground
+};
+const STYLE_DEFAULT = { era: "medieval", ...ERA_DEFAULT.medieval, walls: "auto", landmarks: null };
 function normalizeStyle(st) {
-  const o = { ...STYLE_DEFAULT };
-  if (!st || typeof st !== "object") return o;
-  if (["medieval", "modern", "future", "alien"].includes(st.era)) o.era = st.era;
+  if (!st || typeof st !== "object") st = {};
+  const era = ["medieval", "modern", "future", "alien"].includes(st.era) ? st.era : "medieval";
+  const d = ERA_DEFAULT[era];
+  const o = { era, ...d, walls: "auto", landmarks: null };
   if (["organic", "grid", "radial", "ring", "terraced"].includes(st.street_pattern)) o.street_pattern = st.street_pattern;
-  o.block_scale = clamp(+st.block_scale || 1, 0.5, 2);
-  o.building_height = clamp(+st.building_height || 1, 0.5, 4);
+  if (Number.isFinite(+st.block_scale)) o.block_scale = clamp(+st.block_scale, 0.5, 2);
+  if (Number.isFinite(+st.building_height)) o.building_height = clamp(+st.building_height, 0.5, 4);
   if (["always", "never", "auto"].includes(st.walls)) o.walls = st.walls;
   if (Array.isArray(st.landmarks)) o.landmarks = st.landmarks.filter(k => typeof k === "string").slice(0, 16);
   return o;
@@ -93,7 +102,7 @@ function initParams(spec) {
   return {
     seed: spec.seed, sea: 0.40, hydro: "naive", climate: "noise", riverThr: 260,
     ridges: spec.mountains.map((m, k) => ({ mid: m.id, region: m.region, orientation: m.orientation, amp: 0.14, k })),
-    basins: [], unsat: [], pos: null,
+    basins: [], unsat: [], relaxed: [], pos: null,
   };
 }
 
@@ -686,8 +695,8 @@ const ITEM_ZH = t => {
   if (t.startsWith("near:")) { const [, d] = t.slice(5).split("@"); return `路程不超过 ${d} 天`; }
   return REQ_ZH[t] || t;
 };
-function analyseConflict(W, s, extra) {
-  const items = [...(s.region ? ["region:" + s.region] : []), ...s.requires, ...(extra || [])];
+function analyseConflict(W, s) {
+  const items = effItems(W.P, W.spec, s);      // constraints already traded away are not part of the conflict
   if (!items.length) return null;
   const core = minimalCore(W, items);
   if (!core) return null;
@@ -705,6 +714,101 @@ function analyseConflict(W, s, extra) {
     if (feasibleCount(W, rest, true).n > 0) alts.push(`放弃「${ITEM_ZH(t)}」${proposed.has(t) ? "（提议约束，可优先让步）" : t === "coast" || t === "river_mouth" ? "（改为内河港）" : ""}`);
   }
   return { core, reason: `${core.map(ITEM_ZH).join(" + ")} 无法同时满足`, alternatives: alts };
+}
+
+// ---------- relaxation: what a constraint may be traded for ----------
+// A relaxation either drops a constraint or swaps it for a weaker one of the same kind. Nothing here can
+// strengthen a constraint, and applyActions refuses a trade on any item the conflict analysis did not put in a
+// minimal core — so a constraint is only ever given up against a proof that it cannot be kept.
+const RELAX_TO = {
+  river_mouth: ["coast", "on_river"],   // an estuary port falls back to any coast, or to an inland river port
+  coast: ["on_river", "lakeside"],      // a sea port becomes a river or lake port
+  near_mountain: ["defensible"],        // "by the mountains" usually stands in for "commands the ground"
+  on_river: [], lakeside: [], accessible: [], defensible: [],
+};
+function relaxTargets(item) {
+  if (item.startsWith("region:")) return REGIONS.filter(r => r !== item.slice(7)).map(r => "region:" + r);
+  if (item.startsWith("near:")) { const [o, d] = item.slice(5).split("@"); return [2, 3].map(k => `near:${o}@${Math.min(40, Math.round(+d * k))}`); }
+  if (item.startsWith("downstream:")) return [];       // a water-system dependency either holds or it does not
+  return RELAX_TO[item] || [];
+}
+const relaxOf = (P, sid) => (P.relaxed || []).filter(r => r.sid === sid);
+const relaxFind = (P, sid, item) => relaxOf(P, sid).find(r => r.item === item) || null;
+// every constraint a settlement owns, written the way the conflict core writes them
+function ownedItems(spec, s) {
+  return [...(s.region ? ["region:" + s.region] : []), ...s.requires,
+    ...(spec.relations || []).filter(r => r.a === s.id).map(r => r.type === "downstream_of" ? "downstream:" + r.b : "near:" + r.b + "@" + r.days)];
+}
+// the same list after relaxations: a swapped item shows its replacement, a dropped one disappears
+function effItems(P, spec, s) {
+  return ownedItems(spec, s).map(t => { const r = relaxFind(P, s.id, t); return r ? r.to : t; }).filter(Boolean);
+}
+function effRegion(P, s) {
+  if (!s.region) return null;
+  const r = relaxFind(P, s.id, "region:" + s.region);
+  return r ? (r.to ? r.to.slice(7) : null) : s.region;
+}
+// what one core item could become, and how many cells each option would leave open
+function relaxOptions(W, core, t) {
+  const rest = core.filter(x => x !== t);
+  const count = items => ({ cells_now: feasibleCount(W, items, false).n, cells_after_tools: feasibleCount(W, items, true).n });
+  const opts = [{ to: null, label: "放弃", ...count(rest) }];
+  for (const to of relaxTargets(t)) {
+    if (core.includes(to)) continue;
+    opts.push({ to, label: ITEM_ZH(to), ...count([...rest, to]) });
+  }
+  return opts.filter(o => o.cells_after_tools > 0);
+}
+// One brief per settlement whose constraints are jointly unsatisfiable. This is the whole input the negotiator
+// reasons over: what conflicts, where each item came from, why the intent layer proposed it, and what each way
+// out would cost. Everything here is structured — nothing is left for a policy to parse back out of prose.
+function conflictBriefs(W, rep) {
+  const out = [], seen = new Set();
+  for (const c of rep.fails) {
+    if (!c.conflict || seen.has(c.target)) continue;
+    const s = W.spec.settlements.find(q => q.id === c.target); if (!s) continue;
+    seen.add(c.target);
+    const proposed = new Set(s.proposed || []);
+    const relByItem = {};
+    for (const rl of W.spec.relations || []) if (rl.a === s.id) relByItem[rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days] = rl;
+    out.push({
+      key: c.target + "|" + c.conflict.core.slice().sort().join("+"),
+      target: s.id, name: s.name, type: TYPE_ZH[s.type], reason: c.conflict.reason,
+      checks: rep.fails.filter(f => f.target === s.id && f.conflict).map(f => f.id),
+      core: c.conflict.core.map(t => {
+        const rl = relByItem[t];
+        return {
+          item: t, label: ITEM_ZH(t),
+          source: rl ? rl.source : proposed.has(t) ? "proposed" : "explicit",
+          rationale: rl ? rl.rationale || "" : proposed.has(t) ? s.rationale || "" : "",
+          can_become: relaxOptions(W, c.conflict.core, t),
+        };
+      }),
+    });
+  }
+  return out;
+}
+// Offline stand-in for the negotiator: yield the first proposed item that has a way out, otherwise declare.
+// It has no access to the description, so it can only rank by provenance — which is exactly the baseline the
+// LLM stage is supposed to beat.
+function scriptedNegotiate(W, briefs) {
+  const actions = [], notes = [];
+  for (const b of briefs) {
+    const ordered = [...b.core].sort((x, y) => (y.source === "proposed" ? 1 : 0) - (x.source === "proposed" ? 1 : 0));
+    const pick = ordered.find(c => c.can_become.length);
+    if (!pick) {
+      b.checks.forEach(id => actions.push({ tool: "declare_unsatisfiable", args: { check_id: id, reason: b.reason } }));
+      notes.push(`${b.name}：${b.reason}，没有可替代的约束 → 声明无法满足`);
+      continue;
+    }
+    // keep as much of the constraint as possible: prefer a swap over a drop, then one that already has room
+    const swaps = pick.can_become.filter(o => o.to);
+    const best = (swaps.length ? swaps : pick.can_become).slice()
+      .sort((x, y) => (y.cells_now - x.cells_now) || (y.cells_after_tools - x.cells_after_tools))[0];
+    actions.push({ tool: "relax_constraint", args: { target: b.target, item: pick.item, to: best.to, reason: `规则基线：${pick.source === "proposed" ? "提议约束优先让步" : "冲突核中唯一可让的约束"}` } });
+    notes.push(`${b.name}：${ITEM_ZH(pick.item)} → ${best.label}`);
+  }
+  return { analysis: notes.length ? notes.join("；") + "。" : "没有可让步的约束。", actions };
 }
 
 // ---------- verifier ----------
@@ -729,7 +833,12 @@ function rainShadow(W, m) {
 }
 function verify(W, lore) {
   const { spec, P, hy } = W; const C = [];
-  const add = o => { if (P.unsat.includes(o.id) && !o.pass) o.status = "declared"; else o.status = o.pass ? "pass" : "fail"; C.push(o); };
+  const add = o => {
+    if (o.relaxedOff) o.status = "relaxed";                                  // traded away on purpose, with a reason
+    else if (P.unsat.includes(o.id) && !o.pass) o.status = "declared";       // given up as impossible
+    else o.status = o.pass ? "pass" : "fail";
+    C.push(o);
+  };
   const hasOcean = W.ocean.some(v => v);
   // physical
   add({ id: "phys.sinks", cat: "物理", code: "river_sink", label: "河流必须汇入海洋、湖泊或流出图幅", pass: hy.sinks.length === 0, measured: hy.sinks.length ? `${hy.sinks.length} 处河道终止于无出口洼地` : "所有河道都有出口", at: hy.sinks.slice(0, 6).map(s => cellXY(s.i)) });
@@ -753,20 +862,36 @@ function verify(W, lore) {
   if (spec.min_lakes > 0) add({ id: "spec.lakes", cat: "规格", code: "few_lakes", label: `至少 ${spec.min_lakes} 个湖泊`, pass: hy.lakes.length >= spec.min_lakes, measured: `现有 ${hy.lakes.length} 个`, at: [] });
   for (const s of spec.settlements) {
     const i = posIdx(W, s.id), p = W.P.pos[s.id];
-    if (s.region) { const r = regionOf(...p); add({ id: `spec.region.${s.id}`, cat: "规格", code: "wrong_region", target: s.id, label: `${s.name}应在${REGION_ZH[s.region]}部`, pass: r === s.region, measured: `实际在${REGION_ZH[r]}部`, at: [p] }); }
+    if (s.region) {
+      const rx = relaxFind(P, s.id, "region:" + s.region), want = effRegion(P, s), r = regionOf(...p);
+      const note = rx ? `（原为${REGION_ZH[s.region]}部，已让步：${rx.reason || "无理由"}）` : "";
+      add({ id: `spec.region.${s.id}`, cat: "规格", code: "wrong_region", target: s.id, item: want ? "region:" + want : null,
+        relaxed: !!rx, relaxedOff: !!rx && !want,
+        label: want ? `${s.name}应在${REGION_ZH[want]}部${note}` : `${s.name}原应在${REGION_ZH[s.region]}部${note}`,
+        pass: want ? r === want : true, measured: `实际在${REGION_ZH[r]}部`, at: [p] });
+    }
     for (const q of s.requires) {
-      if ((q === "coast" || q === "river_mouth") && !hasOcean) {
-        add({ id: `spec.req.${s.id}.${q}`, cat: "规格", code: "no_ocean", target: s.id, req: q, label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q]}`, pass: false, measured: "规格中整片区域没有海，此要求无法满足", at: [p] });
+      const id = `spec.req.${s.id}.${q}`;                    // the id follows the ORIGINAL item, so trajectories stay comparable
+      const src = (s.proposed || []).includes(q) ? "proposed" : "explicit";
+      const rx = relaxFind(P, s.id, q), q2 = rx ? rx.to : q;
+      if (rx && !q2) {
+        add({ id, cat: "规格", code: "req_relaxed", target: s.id, req: q, source: src, relaxed: true, relaxedOff: true,
+          label: `${s.name}（${TYPE_ZH[s.type]}）原需要${REQ_ZH[q]}`, pass: true, measured: `已放弃：${rx.reason || "无理由"}`, at: [p] });
         continue;
       }
-      const ok = REQ_TEST[q](W, i);
-      const g = q === "accessible" || q === "defensible" ? geoFields(W) : null;
+      const note = rx ? `（原需要${REQ_ZH[q]}，已让步：${rx.reason || "无理由"}）` : (s.proposed || []).includes(q) ? "（提议）" : "";
+      if ((q2 === "coast" || q2 === "river_mouth") && !hasOcean) {
+        add({ id, cat: "规格", code: "no_ocean", target: s.id, req: q2, item: q2, source: src, relaxed: !!rx,
+          label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q2]}${note}`, pass: false, measured: "规格中整片区域没有海，此要求无法满足", at: [p] });
+        continue;
+      }
+      const ok = REQ_TEST[q2](W, i);
+      const g = q2 === "accessible" || q2 === "defensible" ? geoFields(W) : null;
       const detail = !g ? (ok ? "满足" : "不满足")
-        : q === "accessible" ? `通达度 ${g.access[i].toFixed(2)}（需 ≥ ${ACCESS_T}）`
+        : q2 === "accessible" ? `通达度 ${g.access[i].toFixed(2)}（需 ≥ ${ACCESS_T}）`
         : `防御性 ${g.def[i].toFixed(2)}（需 ≥ ${DEF_T}）`;
-      const tag = (s.proposed || []).includes(q) ? "（提议）" : "";
-      add({ id: `spec.req.${s.id}.${q}`, cat: "规格", code: "req_unmet", target: s.id, req: q, source: (s.proposed || []).includes(q) ? "proposed" : "explicit",
-        label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q]}${tag}`, pass: ok, measured: detail, at: [p] });
+      add({ id, cat: "规格", code: "req_unmet", target: s.id, req: q2, item: q2, source: src, relaxed: !!rx,
+        label: `${s.name}（${TYPE_ZH[s.type]}）需要${REQ_ZH[q2]}${note}`, pass: ok, measured: detail, at: [p] });
     }
   }
   // narrative
@@ -779,36 +904,39 @@ function verify(W, lore) {
   for (const rl of spec.relations || []) {
     const A = spec.settlements.find(q => q.id === rl.a), B = spec.settlements.find(q => q.id === rl.b);
     if (!A || !B) continue;
-    const tag = rl.source === "proposed" ? "（提议）" : "";
+    const item0 = rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days;
+    const rx = relaxFind(P, rl.a, item0), item = rx ? rx.to : item0;
+    if (rx && !item) {
+      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_relaxed", target: rl.a, other: rl.b, source: rl.source, relaxed: true, relaxedOff: true,
+        label: `${A.name}原应${REL_ZH[rl.type]}${B.name}`, pass: true, measured: `已放弃：${rx.reason || "无理由"}`, at: [W.P.pos[rl.a]] });
+      continue;
+    }
+    const tag = rx ? `（已让步：${rx.reason || "无理由"}）` : rl.source === "proposed" ? "（提议）" : "";
     if (rl.type === "downstream_of") {
       const ok = dominatesDownstream(W, rl.b, rl.a);
-      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_downstream", target: rl.a, other: rl.b, source: rl.source,
+      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_downstream", target: rl.a, other: rl.b, source: rl.source, item, relaxed: !!rx,
         label: `${A.name}应位于${B.name}的下游${tag}`, pass: ok, measured: ok ? "顺流可达" : "两地不在同一水系的上下游", at: [W.P.pos[rl.a]] });
     } else {
-      const d = travelDays(W, rl.a, rl.b), ok = d != null && d <= rl.days;
-      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_days", target: rl.a, other: rl.b, days: rl.days, source: rl.source,
-        label: `${A.name}到${B.name}不超过 ${rl.days} 天${tag}`, pass: ok, measured: d == null ? "陆路不可达" : `实测 ${d} 天`, at: [W.P.pos[rl.a]] });
+      const days = item.startsWith("near:") ? +item.split("@")[1] : rl.days;
+      const d = travelDays(W, rl.a, rl.b), ok = d != null && d <= days;
+      add({ id: `spec.rel.${rl.id}`, cat: "规格", code: "rel_days", target: rl.a, other: rl.b, days, source: rl.source, item, relaxed: !!rx,
+        label: `${A.name}到${B.name}不超过 ${days} 天${tag}`, pass: ok, measured: d == null ? "陆路不可达" : `实测 ${d} 天`, at: [W.P.pos[rl.a]] });
     }
   }
   // for settlements that fail a placement constraint, work out whether the constraint set is satisfiable at all
   const conflicted = new Set();
   for (const s2 of spec.settlements) {
     if (!C.some(c => c.status === "fail" && c.target === s2.id && ["req_unmet", "wrong_region", "no_ocean", "rel_downstream", "rel_days"].includes(c.code))) continue;
-    const extra = (spec.relations || []).filter(rl => rl.a === s2.id)
-      .map(rl => rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days);
-    const cf = analyseConflict(W, s2, extra);
+    const cf = analyseConflict(W, s2);
     if (!cf) continue;
     conflicted.add(s2.id);
     for (const c of C) {
-      if (c.target !== s2.id || c.status !== "fail") continue;
-      const rl = (spec.relations || []).find(q => `spec.rel.${q.id}` === c.id);
-      const mine = c.code === "wrong_region" ? "region:" + s2.region
-        : rl ? (rl.type === "downstream_of" ? "downstream:" + rl.b : "near:" + rl.b + "@" + rl.days) : c.req;
-      if (mine && cf.core.includes(mine)) { c.conflict = cf; c.measured += `；冲突：${cf.reason}${cf.alternatives.length ? "，可选：" + cf.alternatives.join(" / ") : ""}`; }
+      // `measured` stays a pure measurement; the conflict travels as structured data on `c.conflict`
+      if (c.target === s2.id && c.status === "fail" && c.item && cf.core.includes(c.item)) c.conflict = cf;
     }
   }
   const fails = C.filter(c => c.status === "fail");
-  const counted = C.filter(c => c.status !== "declared");
+  const counted = C.filter(c => c.status !== "declared" && c.status !== "relaxed");
   return { checks: C, fails, rate: counted.length ? counted.filter(c => c.pass).length / counted.length : 1 };
 }
 
@@ -847,11 +975,20 @@ set_river_threshold(value)  — flow accumulation needed to draw a river (60–8
 set_sea_level(value)  — 0.30–0.50. Higher floods more coast.
 move_settlement(id, targets)  — move a settlement to the nearest flat dry cell satisfying ALL targets. targets: array of nearest_coast | nearest_river | nearest_river_mouth | nearest_lake | near_mountain | flattest_nearby | region:<R>. The settlement's spec region is preferred automatically.
 declare_unsatisfiable(check_id, reason)  — mark a check as impossible to satisfy and stop trying.`;
+// The negotiator's only tool. It is deliberately not in TOOL_DOC: the repair agent edits terrain, the negotiator
+// edits the goal, and keeping the two tool sets apart is what makes the stage separable in an ablation.
+const RELAX_DOC = `relax_constraint(target, item, to, reason)  — trade one of a settlement's constraints for a weaker one instead of failing it.
+  target: settlement id.
+  item:   the constraint, written exactly as the conflict core writes it ("coast", "river_mouth", "on_river", "lakeside", "near_mountain", "accessible", "defensible", "region:E", "near:S2@4", "downstream:S2").
+  to:     the weaker constraint that replaces it, taken from that item's "can_become" list, or null to drop it outright.
+  reason: one Chinese sentence naming what in the description justifies the trade.
+  The tool refuses any item the solver did not put in a conflict core, any swap that is not a weakening, and any call without a reason.`;
 
 function applyActions(W, actions) {
   const spec = W.spec; const P = deep(W.P); const results = [];
+  P.relaxed = P.relaxed || [];
   const moves = [];
-  const order = ["declare_unsatisfiable", "set_sea_level", "raise_ridge", "carve_basin", "recompute_climate", "fill_depressions", "set_river_threshold"];
+  const order = ["relax_constraint", "declare_unsatisfiable", "set_sea_level", "raise_ridge", "carve_basin", "recompute_climate", "fill_depressions", "set_river_threshold"];
   const acts = (Array.isArray(actions) ? actions : []).slice(0, 12).map(a => ({ tool: String(a && a.tool || ""), args: (a && a.args) || {} }));
   acts.sort((a, b) => (order.indexOf(a.tool) + 99) % 99 - (order.indexOf(b.tool) + 99) % 99);
   let terrainChanged = false;
@@ -877,6 +1014,23 @@ function applyActions(W, actions) {
       case "set_river_threshold": { const v = clamp(Math.round(+g.value || P.riverThr), 60, 800); results.push({ a, ok: true, msg: `河流阈值 ${P.riverThr} → ${v}` }); P.riverThr = v; terrainChanged = true; break; }
       case "set_sea_level": { const v = clamp(+g.value || P.sea, 0.30, 0.50); results.push({ a, ok: true, msg: `海平面 ${P.sea.toFixed(2)} → ${v.toFixed(2)}` }); P.sea = v; terrainChanged = true; break; }
       case "declare_unsatisfiable": { const id = String(g.check_id || ""); if (!P.unsat.includes(id)) P.unsat.push(id); results.push({ a, ok: true, msg: `声明无法满足：${id}` }); break; }
+      case "relax_constraint": {
+        const sid = String(g.target || ""), item = String(g.item || "");
+        const st = spec.settlements.find(q => q.id === sid);
+        if (!st) { results.push({ a, ok: false, msg: `没有聚落 ${sid}` }); break; }
+        if (!ownedItems(spec, st).includes(item)) { results.push({ a, ok: false, msg: `${st.name} 没有约束「${item}」` }); break; }
+        if (relaxFind(P, sid, item)) { results.push({ a, ok: false, msg: `「${ITEM_ZH(item)}」已经让过一次，不再重复让步` }); break; }
+        // a trade needs a proof: the item must sit in a minimal unsatisfiable core of this settlement's constraints
+        const cf = analyseConflict(W, st);
+        if (!cf || !cf.core.includes(item)) { results.push({ a, ok: false, msg: `「${ITEM_ZH(item)}」不在冲突核里，无需让步` }); break; }
+        const to = g.to == null || g.to === "" || g.to === "null" ? null : String(g.to);
+        if (to && !relaxTargets(item).includes(to)) { results.push({ a, ok: false, msg: `不能把「${ITEM_ZH(item)}」换成「${ITEM_ZH(to)}」（只能放弃或换成更弱的约束）` }); break; }
+        const reason = String(g.reason || "").slice(0, 160);
+        if (!reason) { results.push({ a, ok: false, msg: "让步必须给出理由" }); break; }
+        P.relaxed.push({ sid, item, to, reason });
+        results.push({ a, ok: true, msg: `${st.name}：${ITEM_ZH(item)} → ${to ? ITEM_ZH(to) : "放弃"}（${reason}）` });
+        break;
+      }
       case "move_settlement": moves.push(a); break;
       default: results.push({ a, ok: false, msg: `未知工具 ${a.tool}` });
     }
@@ -918,7 +1072,7 @@ function moveSettlement(W, a) {
     }
     return best;
   };
-  const pref = regions.length ? null : s.region;
+  const pref = regions.length ? null : effRegion(W.P, s);
   let best = search(pref), outside = false;
   if (best < 0 && pref) { best = search(null); outside = best >= 0; }
   if (best < 0) return { a, ok: false, msg: `找不到同时满足 [${targets.join(", ")}] 的位置${pref ? `（${REGION_ZH[pref]}部及全图）` : ""}` };
@@ -945,8 +1099,8 @@ function scriptedStructured(W, report, history) {
       case "few_lakes": {
         if (P.hydro !== "filled") { push("fill_depressions", {}); break; }
         const used = new Set(P.basins.map(b => b.region));
-        const want = W.spec.settlements.find(s => s.requires.includes("lakeside") && s.region && !used.has(s.region));
-        const reg = want ? want.region : ["C", "SW", "NE", "W", "S"].find(r => !used.has(r)) || "C";
+        const want = W.spec.settlements.find(s => effItems(P, W.spec, s).includes("lakeside") && effRegion(P, s) && !used.has(effRegion(P, s)));
+        const reg = want ? effRegion(P, want) : ["C", "SW", "NE", "W", "S"].find(r => !used.has(r)) || "C";
         push("carve_basin", { region: reg }); notes.push(`湖泊不足 → 在${REGION_ZH[reg]}部挖盆地`); break;
       }
       case "no_ocean": push("declare_unsatisfiable", { check_id: v.id, reason: "规格没有海，港口无法临海" }); notes.push("内陆区域不可能有港口 → 声明无法满足"); break;
@@ -965,7 +1119,7 @@ function scriptedStructured(W, report, history) {
     const loreT = settleT[s.id];
     if (!failing.length && !(loreT && loreT.size)) continue;
     const tg = new Set(loreT || []);
-    s.requires.forEach(q => tg.add(REQ_TARGET[q]));
+    for (const t of effItems(P, W.spec, s)) if (REQ_TARGET[t]) tg.add(REQ_TARGET[t]);
     if (!tg.size) tg.add("flattest_nearby");
     const conflictFails = failing.filter(f => f.conflict);
     if (conflictFails.length) {
@@ -975,9 +1129,10 @@ function scriptedStructured(W, report, history) {
     }
     if (lastFails.has(s.id)) {
       // moving alone did not work last round: change the terrain instead
-      if (s.requires.includes("lakeside") && s.region && !P.basins.some(b => b.region === s.region)) { push("carve_basin", { region: s.region }); if (P.hydro !== "filled") push("fill_depressions", {}); notes.push(`${s.name}附近无湖 → 在${REGION_ZH[s.region]}部造湖`); }
-      else if (s.requires.some(q => q === "on_river" || q === "river_mouth") && P.riverThr > 90) { push("set_river_threshold", { value: Math.round(P.riverThr * 0.6) }); notes.push(`${s.name}附近无合适河道 → 降低河流阈值`); }
-      else if (s.requires.includes("near_mountain") && s.region) { push("raise_ridge", { region: s.region, amount: 0.12 }); notes.push(`${s.name}附近山地不够 → 抬高山脊`); }
+      const eff = effItems(P, W.spec, s), reg = effRegion(P, s);
+      if (eff.includes("lakeside") && reg && !P.basins.some(b => b.region === reg)) { push("carve_basin", { region: reg }); if (P.hydro !== "filled") push("fill_depressions", {}); notes.push(`${s.name}附近无湖 → 在${REGION_ZH[reg]}部造湖`); }
+      else if (eff.some(q => q === "on_river" || q === "river_mouth") && P.riverThr > 90) { push("set_river_threshold", { value: Math.round(P.riverThr * 0.6) }); notes.push(`${s.name}附近无合适河道 → 降低河流阈值`); }
+      else if (eff.includes("near_mountain") && reg) { push("raise_ridge", { region: reg, amount: 0.12 }); notes.push(`${s.name}附近山地不够 → 抬高山脊`); }
       else { failing.forEach(f => push("declare_unsatisfiable", { check_id: f.id, reason: "多次移动仍无法满足" })); notes.push(`${s.name}多次移动失败 → 声明无法满足`); continue; }
     }
     push("move_settlement", { id: s.id, targets: [...tg] });

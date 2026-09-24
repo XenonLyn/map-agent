@@ -61,19 +61,45 @@ function makeTestSet(n = 48, seed = 20260101) {
   return out;
 }
 
-// policy: async (W, report, history, iter) => {analysis, actions, stop}
+// policy:    async (W, report, history, iter) => {analysis, actions, stop}
+// negotiate: async (W, briefs) => {analysis, actions} — optional conflict-resolution stage; null disables it,
+//            which is the ablation condition (the repair policy then has to declare conflicts away by itself)
 async function runTrial(trial, policy, opts = {}) {
-  const { maxIter = 6, withLore = false, label = "" } = opts;
+  const { maxIter = 6, withLore = false, label = "", negotiate = null } = opts;
   const t0 = Date.now();
   let W = derive(trial.spec, initParams(trial.spec));
   let rep = verify(W, null);
   const hist = [], traj = [rep.fails.length];
   const seenFail = new Set(rep.fails.map(f => f.id));
   let flips = 0, regressions = 0, actionsTotal = 0, actionsFailed = 0, wasted = 0, stopped = "";
+  let negotiations = 0, negotiateFailed = 0;
+  const negotiated = new Set();
   let prevIds = new Set(rep.fails.map(f => f.id));
   const rec = { trial: trial.id, cat: trial.cat, policy: label, init: rep.fails.length };
   for (let it = 1; it <= maxIter; it++) {
     if (!rep.fails.length) { stopped = "converged"; break; }
+    // conflict resolution, when enabled, runs before the repair policy and does not consume the iteration
+    if (negotiate) {
+      const briefs = conflictBriefs(W, rep).filter(b => !negotiated.has(b.key));
+      if (briefs.length) {
+        briefs.forEach(b => negotiated.add(b.key));
+        let dec = null;
+        try { dec = await negotiate(W, briefs); }
+        catch (e) { stopped = "negotiate_error:" + (e.message || e).slice(0, 60); break; }
+        if (dec && dec.actions && dec.actions.length) {
+          const r = applyActions(W, dec.actions);
+          negotiations++;
+          negotiateFailed += r.results.filter(x => !x.ok).length;
+          actionsTotal += r.results.length;
+          actionsFailed += r.results.filter(x => !x.ok).length;
+          hist.push({ actions: dec.actions, results: r.results, analysis: dec.analysis });
+          W = r.W; rep = verify(W, null);
+          traj.push(rep.fails.length);
+          prevIds = new Set(rep.fails.map(f => f.id));
+          if (!rep.fails.length) { stopped = "converged"; break; }
+        }
+      }
+    }
     let pol;
     try { pol = await policy(W, rep, hist, it); }
     catch (e) { stopped = "policy_error:" + (e.message || e).slice(0, 60); break; }
@@ -92,7 +118,7 @@ async function runTrial(trial, policy, opts = {}) {
     if (!rep.fails.length) { stopped = "converged"; break; }
   }
   if (!stopped) stopped = "max_iter";
-  const declared = W.P.unsat.slice();
+  const declared = W.P.unsat.slice(), relaxed = (W.P.relaxed || []).slice();
   const cores = declared.map(id => {
     const sid = (id.split(".")[2] || "").split(":")[0];
     const st = W.spec.settlements.find(q => q.id === sid);
@@ -110,6 +136,12 @@ async function runTrial(trial, policy, opts = {}) {
     actions: actionsTotal, actions_failed: actionsFailed, wasted_iters: wasted,
     regressions, oscillations: flips,
     declared: declared.length, declared_cores: cores, unsat_expected: expected.length,
+    negotiations, negotiate_failed: negotiateFailed,
+    relaxed: relaxed.length,
+    relaxed_swaps: relaxed.filter(r => r.to).length,
+    relaxed_explicit: relaxed.filter(r => { const st = W.spec.settlements.find(q => q.id === r.sid); return st && !(st.proposed || []).includes(r.item); }).length,
+    relaxed_items: relaxed.map(r => `${r.sid}:${r.item}>${r.to || "drop"}`).join(" ; "),
+    relaxed_reasons: relaxed.map(r => r.reason).join(" ; ").slice(0, 300),
     unsat_tp: tp, unsat_fp: declared.length - tp, unsat_fn: expected.length - tp,
     ms: Date.now() - t0,
   });
@@ -121,6 +153,8 @@ const SCRIPTED = {
   binary: label => ({ label, fn: async (W, rep, hist, it) => scriptedBlind(W, rep, hist, it) }),
   none: label => ({ label, fn: async () => ({ analysis: "", actions: [] }) }),
 };
+// the offline negotiator, in the shape runTrial expects
+const SCRIPTED_NEGOTIATE = async (W, briefs) => scriptedNegotiate(W, briefs);
 
 function toCSV(rows) {
   if (!rows.length) return "";
@@ -143,6 +177,8 @@ function summarise(rows) {
       init: mean(r => r.init), final: mean(r => r.final), iters: mean(r => r.iters),
       rate: mean(r => r.rate), actions: mean(r => r.actions), failed_actions: mean(r => r.actions_failed),
       wasted: mean(r => r.wasted_iters), regress: mean(r => r.regressions), osc: mean(r => r.oscillations),
+      negotiations: mean(r => r.negotiations || 0), relaxed: mean(r => r.relaxed || 0),
+      relaxed_swaps: mean(r => r.relaxed_swaps || 0), relaxed_explicit: mean(r => r.relaxed_explicit || 0),
       unsat_tp: rs.reduce((a, r) => a + r.unsat_tp, 0), unsat_fp: rs.reduce((a, r) => a + r.unsat_fp, 0), unsat_fn: rs.reduce((a, r) => a + r.unsat_fn, 0),
       ms: mean(r => r.ms),
     };

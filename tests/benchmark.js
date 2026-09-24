@@ -1,14 +1,17 @@
 // Batch benchmark of the scripted policies (the baseline) across a generated test set.
-// Usage: node tests/benchmark.js [nTrials] [maxIter]   -> writes results/baseline.csv and prints a summary
+// Usage: node tests/benchmark.js [nTrials] [maxIter] [condition] [from] [to] [negotiate]
+//   condition: structured | binary | none | "" (all)      negotiate: "negotiate" turns the conflict-resolution stage on
+//   -> appends to results/baseline.csv and rewrites results/baseline_summary.csv
 const fs = require("fs"), path = require("path"), vm = require("vm");
 const src = f => fs.readFileSync(path.join(__dirname, "../src", f), "utf8").replace(/if \(typeof module[^\n]*\n/, "");
 const ctx = { console, JSON, Math, Date, performance: { now: () => Date.now() } };
 vm.createContext(ctx);
-vm.runInContext(src("core.js") + src("presets.js") + src("bench.js") + "\nthis.SCRIPTED = SCRIPTED;", ctx, { filename: "bundle.js" });
+vm.runInContext(src("core.js") + src("presets.js") + src("bench.js") + "\nthis.SCRIPTED = SCRIPTED; this.SCRIPTED_NEGOTIATE = SCRIPTED_NEGOTIATE;", ctx, { filename: "bundle.js" });
 
 // args: nTrials maxIter [condition] [from] [to]   — appends to results/baseline.csv so long runs can be chunked
 const N_TRIALS = +(process.argv[2] || 48), MAX_ITER = +(process.argv[3] || 6);
 const ONLY = process.argv[4] || "", FROM = +(process.argv[5] || 0), TO = +(process.argv[6] || N_TRIALS);
+const NEG = (process.argv[7] || "") === "negotiate";
 (async () => {
   const trials = ctx.makeTestSet(N_TRIALS);
   const dir = path.join(__dirname, "../results"); fs.mkdirSync(dir, { recursive: true });
@@ -21,9 +24,9 @@ const ONLY = process.argv[4] || "", FROM = +(process.argv[5] || 0), TO = +(proce
   };
   for (const [cond, mk] of Object.entries(ctx.SCRIPTED)) {
     if (ONLY && cond !== ONLY) continue;
-    const pol = mk("rule-" + cond);
+    const pol = mk("rule-" + cond + (NEG ? "+negotiate" : ""));
     for (const t of trials.slice(FROM, TO)) {
-      const { rec } = await ctx.runTrial(t, pol.fn, { maxIter: MAX_ITER, label: pol.label });
+      const { rec } = await ctx.runTrial(t, pol.fn, { maxIter: MAX_ITER, label: pol.label, negotiate: NEG ? ctx.SCRIPTED_NEGOTIATE : null });
       rows.push(rec); append(rec);
       process.stdout.write(`${rows.length} ${rec.trial} ${rec.policy} ${rec.cat} ${rec.traj} ${rec.stopped}\n`);
     }

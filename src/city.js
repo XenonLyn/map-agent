@@ -44,14 +44,14 @@ const ERA_LANDMARKS = {
   medieval: ["plaza", "market", "cathedral", "church", "chapel", "cityhall", "keep", "lighthouse"],
   modern:   ["plaza", "market", "church", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
   future:   ["plaza", "market", "cityhall", "hospital", "clinic", "school", "library", "station", "factory", "lighthouse"],
-  alien:    ["plaza", "market", "cityhall", "keep", "library"],
+  alien:    ["plaza", "market", "cityhall", "keep", "library", "factory", "station"],
 };
 // when the planner wants a landmark the vocabulary lacks, substitute one with the same function; no entry means drop it
 const LM_ALT = { cathedral: ["church", "chapel"], church: ["chapel", "cathedral"], chapel: ["church"], cityhall: ["keep"], keep: ["cityhall"], hospital: ["clinic"], clinic: ["hospital"], library: ["school"], school: ["library"] };
 // buildings drift towards an era colour; district (zoning) colours stay put so the legend keeps meaning the same thing
 const ERA_ZH = { medieval: "中世纪", modern: "近现代", future: "未来", alien: "异星" };
 const PATTERN_ZH = { organic: "有机街道", grid: "棋盘网格", radial: "放射状", ring: "环状", terraced: "等高线梯田" };
-const ERA_TINT = { medieval: null, modern: ["#8d96a3", 0.42], future: ["#9ec7da", 0.55], alien: ["#a98fb8", 0.5] };
+const ERA_TINT = { medieval: null, modern: ["#6f7a88", 0.52], future: ["#5fd0ea", 0.62], alien: ["#b476dc", 0.6] };
 function mixHex(a, b, t) {
   const px = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
   const [r1, g1, b1] = px(a), [r2, g2, b2] = px(b), q = v => Math.round(v).toString(16).padStart(2, "0");
@@ -358,12 +358,21 @@ function cityPlan(W, s) {
   // landmarks
   const landmarks = [];
   const okAt = (u, v) => { const gi = gidx(u, v); return gi >= 0 && env[gi] === 0; };
-  // the era (or the spec's own list) fixes the vocabulary; anything outside it is substituted or dropped
-  const resolveLM = k => { if (vocab.has(k)) return k; for (const alt of LM_ALT[k] || []) if (vocab.has(alt)) return alt; return null; };
+  // The era (or the spec's own list) fixes the vocabulary; anything outside it is substituted or dropped.
+  // Several kinds can fall back onto the same one (three schools all resolve to "library" in an era with no
+  // schools), so a substitution is capped — otherwise a town ends up with four identical landmarks in a row.
+  // An exact vocabulary hit is never capped: a real city may well have three churches.
+  const lmCount = {};
+  const resolveLM = k => {
+    if (vocab.has(k)) return k;
+    for (const alt of LM_ALT[k] || []) if (vocab.has(alt) && (lmCount[alt] || 0) < 2) return alt;
+    return null;
+  };
   const place = (kind, u, v, w, h, rot, extra = {}) => {
     const k2 = resolveLM(kind); if (!k2) return null;
     for (let t = 0; t < 12 && !okAt(u, v); t++) { u *= 0.85; v *= 0.85; }
     if (!okAt(u, v)) return null;
+    lmCount[k2] = (lmCount[k2] || 0) + 1;
     const L = { kind: k2, u, v, w, h, rot, ...extra }; landmarks.push(L); return L;
   };
   const PS = { city: 1.3, port: 1.1, town: 0.9, village: 0.7, fortress: 1.1 }[type];
